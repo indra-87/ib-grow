@@ -1,304 +1,713 @@
 <!DOCTYPE html>
 <html lang="ko">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>IB Grow - 성장을 위한 기록</title>
-    <script src="https://cdn.tailwindcss.com"></script>
-    <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
-    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
-    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
-    <script src="https://unpkg.com/@supabase/supabase-js@2"></script>
-    <script src="https://unpkg.com/lucide@latest"></script>
-    <style>
-        @import url('https://fonts.googleapis.com/css2?family=Pretendard:wght@400;600;700;900&display=swap');
-        body { font-family: 'Pretendard', sans-serif; background-color: #f8fafc; }
-        .no-scrollbar::-webkit-scrollbar { display: none; }
-    </style>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+
+  <title>IBGrow</title>
+
+  <script src="https://cdn.tailwindcss.com"></script>
+
+  <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+
+  <style>
+    body {
+      margin: 0;
+      background: #f1f5f9;
+      font-family: Pretendard, sans-serif;
+    }
+  </style>
 </head>
 <body>
-    <div id="root"></div>
+  <div id="root"></div>
 
-    <script type="text/babel">
-        // 브라우저 환경을 위한 전역 변수 설정 (import 대체)
-        const { useState, useEffect, useRef, useCallback, useMemo } = React;
-        const { createClient } = supabase;
+  <script type="text/babel">
 
-        // ═══════════════════════════════════════════════════════════════════════════════
-        // 1. CONFIG & SUPABASE SETTINGS
-        // ═══════════════════════════════════════════════════════════════════════════════
-        const SUPABASE_URL = "https://pqjuvuflinnrpemqcafl.supabase.co";
-        const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InBxanV2dWZsaW5ucnBlbXFjYWZsIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzg0NzAzMjQsImV4cCI6MjA5NDA0NjMyNH0.E4sJv1gM9TbWG-2o90aH8wJXZMLRY_uLQ9fgWARX1Ro";
-        const sb = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+    const { useState, useEffect } = React;
 
-        const GEMINI_API_KEY = "AIzaSyAbjeTs7-di6mrIT7JKhCxCOGvXPjjn76M";
-        const MASTER_ID = "admin";
-        const MASTER_PW = "grow123";
+    // ═══════════════════════════════════════════════
+    // SUPABASE
+    // ═══════════════════════════════════════════════
 
-        // IB 관련 상수 (기존 IBGrow.jsx 데이터 유지)
-        const IB_PROFILES = [
-            { id: "inquirer",      icon: "🔍", label: "탐구하는 사람",   color: "#8B5CF6" },
-            { id: "knowledgeable", icon: "📚", label: "지식이 있는 사람", color: "#3B82F6" },
-            { id: "thinker",       icon: "💡", label: "생각하는 사람",   color: "#F59E0B" },
-            { id: "communicator",  icon: "💬", label: "소통하는 사람",   color: "#10B981" },
-            { id: "principled",    icon: "⚖️", label: "원칙이 있는 사람", color: "#EF4444" },
-            { id: "open-minded",   icon: "🌍", label: "열린 마음",       color: "#06B6D4" },
-            { id: "caring",        icon: "🤝", label: "배려하는 사람",   color: "#EC4899" },
-            { id: "risk-taker",    icon: "🚀", label: "도전하는 사람",   color: "#F97316" },
-            { id: "balanced",      icon: "⚡", label: "균형잡힌 사람",   color: "#84CC16" },
-            { id: "reflective",    icon: "💭", label: "성찰하는 사람",   color: "#A78BFA" },
-        ];
+    const SUPABASE_URL = "https://pqjuvuflinnrpemqcafl.supabase.co";
 
-        const LEVELS = [
-            { lv: 1, name: "씨앗",   icon: "🌱", xp: 0    },
-            { lv: 2, name: "새싹",   icon: "🌿", xp: 150  },
-            { lv: 3, name: "탐구자", icon: "🔭", xp: 400  },
-            { lv: 4, name: "발견자", icon: "📖", xp: 800  },
-            { lv: 5, name: "사상가", icon: "💡", xp: 1500 },
-            { lv: 6, name: "선구자", icon: "🚀", xp: 2500 },
-            { lv: 7, name: "마스터", icon: "👑", xp: 4000 },
-        ];
+    const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InBxanV2dWZsaW5ucnBlbXFjYWZsIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzg0NzAzMjQsImV4cCI6MjA5NDA0NjMyNH0.E4sJv1gM9TbWG-2o90aH8wJXZMLRY_uLQ9fgWARX1Ro";
 
-        const getLvInfo = xp => LEVELS.reduce((acc, curr) => (xp >= curr.xp ? curr : acc), LEVELS[0]);
+    const supabase = window.supabase.createClient(
+      SUPABASE_URL,
+      SUPABASE_ANON_KEY
+    );
 
-        // ═══════════════════════════════════════════════════════════════════════════════
-        // 2. AI & OCR LOGIC (기존 IBGrow.jsx 기능)
-        // ═══════════════════════════════════════════════════════════════════════════════
-        async function callGemini(text) {
-            const prompt = `Analyze the following student reflection and assign IB Profile scores (0-10 each). 
-            Output format: JSON { "profiles": { "inquirer": 5, ... }, "summary": "brief feedback" }
-            Text: ${text}`;
-            
-            try {
-                const resp = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${GEMINI_API_KEY}`, {
-                    method: 'POST',
-                    body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] })
-                });
-                const json = await resp.json();
-                return JSON.parse(json.candidates[0].content.parts[0].text.replace(/```json|```/g, ""));
-            } catch (e) {
-                console.error("AI 분석 실패", e);
-                return null;
+    // ═══════════════════════════════════════════════
+    // APP
+    // ═══════════════════════════════════════════════
+
+    function App() {
+
+      const [loading, setLoading] = useState(true);
+      const [syncing, setSyncing] = useState(false);
+
+      const [role, setRole] = useState(null);
+      const [user, setUser] = useState(null);
+
+      const [teachers, setTeachers] = useState([]);
+      const [classes, setClasses] = useState([]);
+      const [students, setStudents] = useState([]);
+      const [records, setRecords] = useState([]);
+
+      const [loginId, setLoginId] = useState('');
+      const [loginPw, setLoginPw] = useState('');
+
+      const [teacherName, setTeacherName] = useState('');
+      const [teacherCode, setTeacherCode] = useState('');
+
+      const [className, setClassName] = useState('');
+      const [studentName, setStudentName] = useState('');
+
+      // ═══════════════════════════════════════════════
+      // LOAD
+      // ═══════════════════════════════════════════════
+
+      useEffect(() => {
+        loadAll();
+
+        const saved = localStorage.getItem('ibgrow-session');
+
+        if(saved){
+          const parsed = JSON.parse(saved);
+          setRole(parsed.role);
+          setUser(parsed.user);
+        }
+
+      }, []);
+
+      async function loadAll(){
+
+        try {
+
+          setLoading(true);
+
+          const teachersRes = await supabase
+            .from('teachers')
+            .select('*');
+
+          const classesRes = await supabase
+            .from('classes')
+            .select('*');
+
+          const studentsRes = await supabase
+            .from('students')
+            .select('*');
+
+          const recordsRes = await supabase
+            .from('records')
+            .select('*');
+
+          setTeachers(teachersRes.data || []);
+          setClasses(classesRes.data || []);
+          setStudents(studentsRes.data || []);
+          setRecords(recordsRes.data || []);
+
+        } catch(err){
+          console.error(err);
+          alert('데이터 로드 실패');
+        } finally {
+          setLoading(false);
+        }
+      }
+
+      // ═══════════════════════════════════════════════
+      // LOGIN
+      // ═══════════════════════════════════════════════
+
+      function login(){
+
+        // MASTER
+        if(loginId === 'admin' && loginPw === 'grow123'){
+
+          const session = {
+            role: 'master',
+            user: {
+              name: '관리자'
             }
+          };
+
+          setRole('master');
+          setUser(session.user);
+
+          localStorage.setItem(
+            'ibgrow-session',
+            JSON.stringify(session)
+          );
+
+          return;
         }
 
-        // ═══════════════════════════════════════════════════════════════════════════════
-        // 3. UI COMPONENTS (Login, Student, Teacher, Master)
-        // ═══════════════════════════════════════════════════════════════════════════════
+        // TEACHER
+        const teacher = teachers.find(
+          t => t.teacher_code === loginId
+          && t.password === loginPw
+        );
 
-        function LoginScreen({ teachers, classes, onStudentLogin, onTeacherLogin, onMasterLogin }) {
-            const [id, setId] = useState("");
-            const [pw, setPw] = useState("");
-            const handleLogin = () => {
-                if (id === MASTER_ID && pw === MASTER_PW) return onMasterLogin();
-                const teacher = teachers.find(t => t.teacher_code === id);
-                if (teacher) return onTeacherLogin(teacher);
-                const student = classes.flatMap(c => c.students || []).find(s => s.student_code === id);
-                if (student) return onStudentLogin(student, classes.find(c => c.id === student.class_id));
-                alert("코드를 다시 확인해 주세요.");
-            };
-            return (
-                <div className="flex flex-col items-center justify-center min-h-screen p-6 bg-indigo-50">
-                    <div className="w-full max-w-md p-10 bg-white rounded-[3rem] shadow-2xl text-center">
-                        <div className="text-7xl mb-6">🌱</div>
-                        <h1 className="text-4xl font-black text-indigo-600 mb-2">IB Grow</h1>
-                        <p className="text-slate-400 mb-10 font-medium tracking-tight">우리는 매일 성장하고 있어요</p>
-                        <div className="space-y-4">
-                            <input className="w-full p-5 bg-slate-100 border-none rounded-3xl focus:ring-2 focus:ring-indigo-400 outline-none transition-all" placeholder="개인코드" value={id} onChange={e=>setId(e.target.value)} />
-                            <input className="w-full p-5 bg-slate-100 border-none rounded-3xl focus:ring-2 focus:ring-indigo-400 outline-none transition-all" type="password" placeholder="비밀번호(관리자용)" value={pw} onChange={e=>setPw(e.target.value)} />
-                            <button onClick={handleLogin} className="w-full p-5 bg-indigo-600 text-white rounded-3xl font-bold shadow-xl shadow-indigo-200 active:scale-95 transition-all">입장하기</button>
-                        </div>
-                    </div>
+        if(teacher){
+
+          const session = {
+            role: 'teacher',
+            user: teacher
+          };
+
+          setRole('teacher');
+          setUser(teacher);
+
+          localStorage.setItem(
+            'ibgrow-session',
+            JSON.stringify(session)
+          );
+
+          return;
+        }
+
+        // STUDENT
+        const student = students.find(
+          s => s.student_code === loginId
+        );
+
+        if(student){
+
+          const session = {
+            role: 'student',
+            user: student
+          };
+
+          setRole('student');
+          setUser(student);
+
+          localStorage.setItem(
+            'ibgrow-session',
+            JSON.stringify(session)
+          );
+
+          return;
+        }
+
+        alert('로그인 실패');
+      }
+
+      function logout(){
+        localStorage.removeItem('ibgrow-session');
+        setRole(null);
+        setUser(null);
+      }
+
+      // ═══════════════════════════════════════════════
+      // CRUD
+      // ═══════════════════════════════════════════════
+
+      async function addTeacher(){
+
+        if(!teacherName || !teacherCode){
+          alert('입력 필요');
+          return;
+        }
+
+        try {
+
+          setSyncing(true);
+
+          const payload = {
+            name: teacherName,
+            teacher_code: teacherCode,
+            password: '1234'
+          };
+
+          const { data, error } = await supabase
+            .from('teachers')
+            .insert([payload])
+            .select();
+
+          if(error) throw error;
+
+          setTeachers(prev => [...prev, ...data]);
+
+          setTeacherName('');
+          setTeacherCode('');
+
+        } catch(err){
+          console.error(err);
+          alert('교사 추가 실패');
+        } finally {
+          setSyncing(false);
+        }
+      }
+
+      async function addClass(){
+
+        if(!className){
+          alert('반 이름 입력');
+          return;
+        }
+
+        try {
+
+          setSyncing(true);
+
+          const payload = {
+            teacher_id: user.id,
+            class_name: className,
+            class_code: Math.random().toString(36).slice(2,8)
+          };
+
+          const { data, error } = await supabase
+            .from('classes')
+            .insert([payload])
+            .select();
+
+          if(error) throw error;
+
+          setClasses(prev => [...prev, ...data]);
+          setClassName('');
+
+        } catch(err){
+          console.error(err);
+        } finally {
+          setSyncing(false);
+        }
+      }
+
+      async function addStudent(classId){
+
+        if(!studentName){
+          alert('학생 이름 입력');
+          return;
+        }
+
+        try {
+
+          setSyncing(true);
+
+          const payload = {
+            class_id: classId,
+            name: studentName,
+            student_code: Math.random().toString(36).slice(2,8),
+            total_xp: 0,
+            level: 1
+          };
+
+          const { data, error } = await supabase
+            .from('students')
+            .insert([payload])
+            .select();
+
+          if(error) throw error;
+
+          setStudents(prev => [...prev, ...data]);
+          setStudentName('');
+
+        } catch(err){
+          console.error(err);
+        } finally {
+          setSyncing(false);
+        }
+      }
+
+      async function addXP(student){
+
+        try {
+
+          setSyncing(true);
+
+          const xp = 10;
+
+          await supabase
+            .from('records')
+            .insert([
+              {
+                student_id: student.id,
+                xp,
+                memo: '활동 참여'
+              }
+            ]);
+
+          const updatedXp = (student.total_xp || 0) + xp;
+
+          await supabase
+            .from('students')
+            .update({
+              total_xp: updatedXp,
+              level: Math.floor(updatedXp / 100) + 1
+            })
+            .eq('id', student.id);
+
+          loadAll();
+
+        } catch(err){
+          console.error(err);
+        } finally {
+          setSyncing(false);
+        }
+      }
+
+      // ═══════════════════════════════════════════════
+      // AUTO BACKUP
+      // ═══════════════════════════════════════════════
+
+      useEffect(() => {
+
+        const interval = setInterval(() => {
+
+          const backup = {
+            teachers,
+            classes,
+            students,
+            records,
+            savedAt: new Date().toISOString()
+          };
+
+          localStorage.setItem(
+            'ibgrow-backup',
+            JSON.stringify(backup)
+          );
+
+          console.log('자동 백업 완료');
+
+        }, 1000 * 60 * 5);
+
+        return () => clearInterval(interval);
+
+      }, [teachers, classes, students, records]);
+
+      // ═══════════════════════════════════════════════
+      // REALTIME
+      // ═══════════════════════════════════════════════
+
+      useEffect(() => {
+
+        const channel = supabase
+          .channel('ibgrow-live')
+          .on(
+            'postgres_changes',
+            {
+              event: '*',
+              schema: 'public'
+            },
+            () => {
+              loadAll();
+            }
+          )
+          .subscribe();
+
+        return () => {
+          supabase.removeChannel(channel);
+        };
+
+      }, []);
+
+      // ═══════════════════════════════════════════════
+      // LOADING
+      // ═══════════════════════════════════════════════
+
+      if(loading){
+        return (
+          <div className="min-h-screen flex items-center justify-center">
+            <div className="text-center">
+              <div className="w-16 h-16 border-4 border-blue-500 border-t-transparent rounded-full animate-spin mx-auto mb-4"></div>
+
+              <p className="font-bold text-slate-700">
+                데이터 불러오는 중...
+              </p>
+            </div>
+          </div>
+        );
+      }
+
+      // ═══════════════════════════════════════════════
+      // LOGIN SCREEN
+      // ═══════════════════════════════════════════════
+
+      if(!role){
+
+        return (
+          <div className="min-h-screen flex items-center justify-center p-4">
+
+            <div className="bg-white rounded-3xl shadow-xl p-6 w-full max-w-md">
+
+              <h1 className="text-3xl font-black text-center mb-6">
+                IBGrow
+              </h1>
+
+              <div className="space-y-3">
+
+                <input
+                  className="w-full border rounded-xl p-3"
+                  placeholder="아이디"
+                  value={loginId}
+                  onChange={e => setLoginId(e.target.value)}
+                />
+
+                <input
+                  type="password"
+                  className="w-full border rounded-xl p-3"
+                  placeholder="비밀번호"
+                  value={loginPw}
+                  onChange={e => setLoginPw(e.target.value)}
+                />
+
+                <button
+                  onClick={login}
+                  className="w-full bg-blue-600 text-white p-3 rounded-xl font-bold"
+                >
+                  로그인
+                </button>
+
+                <div className="text-sm text-slate-500 pt-2">
+                  관리자: admin / grow123
                 </div>
-            );
-        }
 
-        function StudentApp({ student, classData, onAddRecord, onLogout }) {
-            const [content, setContent] = useState("");
-            const [isAnalyzing, setIsAnalyzing] = useState(false);
-            const lvInfo = getLvInfo(student.total_xp || 0);
+              </div>
 
-            const handleRecord = async () => {
-                if (!content.trim()) return alert("기록을 입력하세요.");
-                setIsAnalyzing(true);
-                
-                const aiResult = await callGemini(content);
-                const profiles = aiResult ? Object.keys(aiResult.profiles).filter(k => aiResult.profiles[k] > 5) : ["inquirer"];
-                const xp = 20 + (profiles.length * 5);
+            </div>
 
-                const newRec = {
-                    student_id: student.id,
-                    date: new Date().toISOString(),
-                    content,
-                    profiles,
-                    xp,
-                    type: "student_entry"
-                };
+          </div>
+        );
+      }
 
-                await onAddRecord(classData.id, newRec, xp, aiResult?.profiles || {});
-                setContent("");
-                setIsAnalyzing(false);
-                alert("기록이 저장되었습니다! 성장에너지를 얻었어요.");
-            };
+      // ═══════════════════════════════════════════════
+      // APP UI
+      // ═══════════════════════════════════════════════
 
-            return (
-                <div className="min-h-screen pb-24">
-                    <div className="bg-white p-8 rounded-b-[3.5rem] shadow-sm mb-8 border-b">
-                        <div className="flex justify-between items-center mb-8">
-                            <div>
-                                <h2 className="text-3xl font-black text-slate-800">{student.name}</h2>
-                                <p className="text-indigo-600 font-bold">{classData.name}</p>
-                            </div>
-                            <button onClick={onLogout} className="p-4 bg-slate-50 rounded-3xl text-slate-400">🚪</button>
-                        </div>
-                        <div className="bg-indigo-600 p-7 rounded-[2.5rem] text-white shadow-lg shadow-indigo-100 flex items-center gap-6">
-                            <div className="text-6xl bg-white/20 w-24 h-24 flex items-center justify-center rounded-[2rem]">{lvInfo.icon}</div>
-                            <div className="flex-1">
-                                <div className="flex justify-between items-end mb-3">
-                                    <span className="font-black text-xl">Lv.{lvInfo.lv} {lvInfo.name}</span>
-                                    <span className="text-sm font-bold opacity-80">{student.total_xp || 0} XP</span>
-                                </div>
-                                <div className="h-4 bg-white/20 rounded-full overflow-hidden">
-                                    <div className="bg-white h-full transition-all duration-1000" style={{width: `${Math.min(100, ((student.total_xp || 0)/4000)*100)}%`}}></div>
-                                </div>
-                            </div>
-                        </div>
+      return (
+        <div className="min-h-screen p-4 md:p-8 overflow-x-hidden">
+
+          {syncing && (
+            <div className="fixed bottom-4 right-4 bg-blue-600 text-white px-4 py-2 rounded-full shadow-xl animate-pulse z-50">
+              저장 중...
+            </div>
+          )}
+
+          <div className="bg-white rounded-3xl p-4 md:p-6 shadow-xl mb-6">
+
+            <div className="flex flex-col md:flex-row justify-between gap-4">
+
+              <div>
+                <h1 className="text-2xl md:text-4xl font-black">
+                  IBGrow
+                </h1>
+
+                <p className="text-slate-500 mt-1">
+                  {role} 로그인
+                </p>
+              </div>
+
+              <button
+                onClick={logout}
+                className="bg-red-500 text-white px-4 py-2 rounded-xl font-bold"
+              >
+                로그아웃
+              </button>
+
+            </div>
+          </div>
+
+          {role === 'master' && (
+
+            <div className="bg-white rounded-3xl p-6 shadow-xl mb-6">
+
+              <h2 className="text-2xl font-black mb-4">
+                교사 관리
+              </h2>
+
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mb-4">
+
+                <input
+                  className="border rounded-xl p-3"
+                  placeholder="교사 이름"
+                  value={teacherName}
+                  onChange={e => setTeacherName(e.target.value)}
+                />
+
+                <input
+                  className="border rounded-xl p-3"
+                  placeholder="교사 코드"
+                  value={teacherCode}
+                  onChange={e => setTeacherCode(e.target.value)}
+                />
+
+                <button
+                  onClick={addTeacher}
+                  className="bg-blue-600 text-white rounded-xl font-bold"
+                >
+                  교사 추가
+                </button>
+
+              </div>
+
+              <div className="space-y-3">
+
+                {teachers.map(t => (
+                  <div
+                    key={t.id}
+                    className="border rounded-2xl p-4"
+                  >
+                    <div className="font-bold">
+                      {t.name}
                     </div>
 
-                    <div className="px-6 space-y-8 max-w-2xl mx-auto">
-                        <div className="bg-white p-8 rounded-[3rem] shadow-sm border border-slate-100">
-                            <h3 className="text-xl font-bold text-slate-800 mb-6 flex items-center gap-3">📝 오늘 어떤 배움이 있었나요?</h3>
-                            <textarea className="w-full h-48 p-6 bg-slate-50 rounded-[2rem] outline-none resize-none text-lg mb-6 focus:ring-2 focus:ring-indigo-400 transition-all" placeholder="배운 내용이나 느낀 점을 자유롭게 적어보세요..." value={content} onChange={e=>setContent(e.target.value)} />
-                            <button onClick={handleRecord} disabled={isAnalyzing} className="w-full py-5 bg-indigo-600 text-white rounded-[2rem] font-bold text-xl active:scale-95 transition-all shadow-lg shadow-indigo-100 disabled:opacity-50">
-                                {isAnalyzing ? "AI가 배움을 분석 중..." : "기록 남기기"}
-                            </button>
-                        </div>
-
-                        <div className="space-y-4">
-                            <h3 className="text-lg font-bold text-slate-800 px-2">나의 배움 발자취</h3>
-                            {classData.records?.filter(r=>r.student_id === student.id).sort((a,b)=>new Date(b.date)-new Date(a.date)).map(r => (
-                                <div key={r.id} className="bg-white p-6 rounded-[2rem] border border-slate-100 shadow-sm">
-                                    <div className="flex justify-between text-xs text-slate-400 font-bold mb-3 uppercase tracking-wider">
-                                        <span>{new Date(r.date).toLocaleDateString()}</span>
-                                        <span className="text-indigo-500">+{r.xp} XP</span>
-                                    </div>
-                                    <p className="text-slate-600 text-lg leading-relaxed mb-4">{r.content}</p>
-                                    <div className="flex flex-wrap gap-2">
-                                        {r.profiles?.map(p => (
-                                            <span key={p} className="px-3 py-1 bg-indigo-50 text-indigo-500 text-xs rounded-full font-bold">#{IB_PROFILES.find(ip=>ip.id===p)?.label}</span>
-                                        ))}
-                                    </div>
-                                </div>
-                            ))}
-                        </div>
+                    <div className="text-slate-500 text-sm">
+                      코드: {t.teacher_code}
                     </div>
+                  </div>
+                ))}
+
+              </div>
+
+            </div>
+          )}
+
+          {role === 'teacher' && (
+
+            <div className="space-y-6">
+
+              <div className="bg-white rounded-3xl p-6 shadow-xl">
+
+                <h2 className="text-2xl font-black mb-4">
+                  반 관리
+                </h2>
+
+                <div className="flex flex-col md:flex-row gap-3 mb-4">
+
+                  <input
+                    className="flex-1 border rounded-xl p-3"
+                    placeholder="반 이름"
+                    value={className}
+                    onChange={e => setClassName(e.target.value)}
+                  />
+
+                  <button
+                    onClick={addClass}
+                    className="bg-blue-600 text-white px-5 rounded-xl font-bold"
+                  >
+                    반 추가
+                  </button>
+
                 </div>
-            );
-        }
 
-        // --- Teacher App ---
-        function TeacherApp({ teacher, classes, onLogout }) {
-            const myClasses = classes.filter(c => c.teacher_id === teacher.id);
-            return (
-                <div className="min-h-screen bg-slate-50">
-                    <header className="bg-white p-8 border-b flex justify-between items-center shadow-sm">
-                        <div className="flex items-center gap-4">
-                            <div className="w-12 h-12 bg-indigo-100 rounded-2xl flex items-center justify-center text-2xl">👩‍🏫</div>
-                            <div>
-                                <h1 className="text-2xl font-black text-slate-800">{teacher.name} 선생님</h1>
-                                <p className="text-xs text-indigo-500 font-black uppercase tracking-widest">Teacher Dashboard</p>
-                            </div>
-                        </div>
-                        <button onClick={onLogout} className="p-4 text-slate-400 hover:bg-slate-50 rounded-3xl transition-all">🚪</button>
-                    </header>
-                    <main className="p-8 max-w-4xl mx-auto space-y-8">
-                        {myClasses.map(c => (
-                            <div key={c.id} className="bg-white rounded-[3rem] shadow-sm border border-slate-100 overflow-hidden">
-                                <div className="p-8 bg-indigo-50/50 border-b border-indigo-100 flex justify-between items-center">
-                                    <h3 className="text-2xl font-black text-indigo-900">{c.name}</h3>
-                                    <span className="px-4 py-2 bg-white rounded-2xl text-sm font-bold text-indigo-600 border border-indigo-100">{c.students?.length || 0} 명의 학생</span>
+                <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+
+                  {classes
+                    .filter(c => c.teacher_id === user.id)
+                    .map(c => (
+
+                    <div
+                      key={c.id}
+                      className="border rounded-2xl p-4"
+                    >
+
+                      <h3 className="font-black text-xl mb-3">
+                        {c.class_name}
+                      </h3>
+
+                      <div className="flex flex-col md:flex-row gap-2 mb-4">
+
+                        <input
+                          className="flex-1 border rounded-xl p-3"
+                          placeholder="학생 이름"
+                          value={studentName}
+                          onChange={e => setStudentName(e.target.value)}
+                        />
+
+                        <button
+                          onClick={() => addStudent(c.id)}
+                          className="bg-green-600 text-white px-4 rounded-xl font-bold"
+                        >
+                          학생 추가
+                        </button>
+
+                      </div>
+
+                      <div className="space-y-3">
+
+                        {students
+                          .filter(s => s.class_id === c.id)
+                          .map(s => (
+
+                          <div
+                            key={s.id}
+                            className="bg-slate-100 rounded-2xl p-4"
+                          >
+
+                            <div className="flex flex-col md:flex-row justify-between gap-3">
+
+                              <div>
+                                <div className="font-black text-lg">
+                                  {s.name}
                                 </div>
-                                <div className="p-8 grid grid-cols-1 md:grid-cols-2 gap-4">
-                                    {c.students?.sort((a,b)=>a.num - b.num).map(s => (
-                                        <div key={s.id} className="flex items-center justify-between p-5 bg-slate-50 rounded-[1.5rem] border border-transparent hover:border-indigo-200 transition-all">
-                                            <span className="font-bold text-slate-700">{s.num}. {s.name}</span>
-                                            <div className="flex items-center gap-3">
-                                                <span className="text-xs font-black px-2 py-1 bg-white rounded-lg text-indigo-500 border border-indigo-100">Lv.{s.level}</span>
-                                                <span className="text-xs text-slate-400 font-bold">{s.total_xp} XP</span>
-                                            </div>
-                                        </div>
-                                    ))}
+
+                                <div className="text-sm text-slate-500">
+                                  LV.{s.level} / XP {s.total_xp}
                                 </div>
+
+                                <div className="text-xs text-slate-400 mt-1">
+                                  코드: {s.student_code}
+                                </div>
+                              </div>
+
+                              <button
+                                onClick={() => addXP(s)}
+                                className="bg-yellow-500 text-white px-4 py-2 rounded-xl font-bold"
+                              >
+                                +10 XP
+                              </button>
+
                             </div>
+
+                          </div>
                         ))}
-                    </main>
+
+                      </div>
+
+                    </div>
+                  ))}
+
                 </div>
-            );
-        }
 
-        // ═══════════════════════════════════════════════════════════════════════════════
-        // 4. MAIN APP LOGIC
-        // ═══════════════════════════════════════════════════════════════════════════════
-        function IBGrowApp() {
-            const [loading, setLoading] = useState(true);
-            const [mode, setMode] = useState("login");
-            const [teachers, setTeachers] = useState([]);
-            const [classes, setClasses] = useState([]);
-            const [currUser, setCurrUser] = useState(null);
-            const [currClass, setCurrClass] = useState(null);
+              </div>
 
-            const fetchData = async () => {
-                const { data: t } = await sb.from('teachers').select('*');
-                const { data: c } = await sb.from('classes').select('*, students(*), records(*)');
-                setTeachers(t || []);
-                setClasses(c || []);
-                setLoading(false);
-            };
+            </div>
+          )}
 
-            useEffect(() => { fetchData(); }, []);
+          {role === 'student' && (
 
-            const addRecord = async (cid, rec, xp, profileScores) => {
-                // 1. Record 저장
-                await sb.from('records').insert([{ ...rec, class_id: cid, profile_scores: profileScores }]);
-                
-                // 2. Student 점수 업데이트
-                const newXp = (currUser.total_xp || 0) + xp;
-                const newProfiles = { ...(currUser.profiles || {}) };
-                Object.entries(profileScores).forEach(([k,v]) => {
-                    newProfiles[k] = (newProfiles[k] || 0) + v;
-                });
+            <div className="bg-white rounded-3xl p-6 shadow-xl max-w-xl mx-auto">
 
-                const { data: updatedStudent } = await sb.from('students')
-                    .update({ total_xp: newXp, profiles: newProfiles, level: getLvInfo(newXp).lv })
-                    .eq('id', currUser.id)
-                    .select()
-                    .single();
+              <h2 className="text-3xl font-black mb-4 text-center">
+                {user.name}
+              </h2>
 
-                // 3. 로컬 상태 갱신
-                setCurrUser(updatedStudent);
-                fetchData(); // 전체 데이터 다시 불러오기
-            };
+              <div className="text-center">
 
-            if (loading) return (
-                <div className="h-screen flex flex-col items-center justify-center bg-white">
-                    <div className="w-16 h-16 border-4 border-indigo-600 border-t-transparent rounded-full animate-spin mb-6"></div>
-                    <p className="text-slate-400 font-black text-xl animate-pulse">학교 데이터를 가져오는 중...</p>
+                <div className="text-6xl font-black text-blue-600 mb-2">
+                  LV.{user.level}
                 </div>
-            );
 
-            if (mode === "login") return <LoginScreen teachers={teachers} classes={classes} 
-                                            onMasterLogin={()=>setMode("master")} 
-                                            onTeacherLogin={t=>{setCurrUser(t); setMode("teacher");}} 
-                                            onStudentLogin={(s,c)=>{setCurrUser(s); setCurrClass(c); setMode("student");}} />;
-            
-            if (mode === "student") return <StudentApp student={currUser} classData={currClass} onAddRecord={addRecord} onLogout={()=>setMode("login")} />;
-            if (mode === "teacher") return <TeacherApp teacher={currUser} classes={classes} onLogout={()=>setMode("login")} />;
-            
-            return <div className="p-20 text-center">관리자 모드는 준비 중입니다. <button onClick={()=>setMode("login")}>돌아가기</button></div>;
-        }
+                <div className="text-2xl font-bold text-slate-700">
+                  XP {user.total_xp}
+                </div>
 
-        const root = ReactDOM.createRoot(document.getElementById('root'));
-        root.render(<IBGrowApp />);
-    </script>
+              </div>
+
+            </div>
+          )}
+
+        </div>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+
+  </script>
 </body>
 </html>
