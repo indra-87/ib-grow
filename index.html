@@ -1,0 +1,2408 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>IB Grow</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <style>
+    *{box-sizing:border-box}body{margin:0}
+    @keyframes spin{to{transform:rotate(360deg)}}
+    .animate-spin{animation:spin 1s linear infinite}
+    @keyframes bounce{0%,100%{transform:translateY(-25%)}50%{transform:translateY(0)}}
+    .animate-bounce{animation:bounce 1s infinite}
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="text/babel">
+const {useState,useRef,useEffect,useCallback}=React;
+
+// 
+// CONFIG
+// 
+
+//  Supabase 
+const SUPABASE_URL  = "https://pqjuvuflinnrpemqcafl.supabase.co";
+const SUPABASE_ANON = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InBxanV2dWZsaW5ucnBlbXFjYWZsIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzg0NzAzMjQsImV4cCI6MjA5NDA0NjMyNH0.E4sJv1gM9TbWG-2o90aH8wJXZMLRY_uLQ9fgWARX1Ro";
+const SB_HEADS = {
+  "Content-Type": "application/json",
+  "apikey": SUPABASE_ANON,
+  "Authorization": "Bearer " + SUPABASE_ANON,
+  "Prefer": "return=representation"
+};
+async function sbGet(table, q) {
+  const r = await fetch(SUPABASE_URL + "/rest/v1/" + table + (q||""), { headers: SB_HEADS });
+  if (!r.ok) throw new Error(await r.text());
+  return r.json();
+}
+async function sbUpsert(table, body) {
+  const r = await fetch(SUPABASE_URL + "/rest/v1/" + table, {
+    method: "POST",
+    headers: { ...SB_HEADS, "Prefer": "resolution=merge-duplicates,return=representation" },
+    body: JSON.stringify(body)
+  });
+  if (!r.ok) throw new Error(await r.text());
+  return r.json();
+}
+async function sbPatch(table, id, body) {
+  const r = await fetch(SUPABASE_URL + "/rest/v1/" + table + "?id=eq." + id, {
+    method: "PATCH", headers: SB_HEADS, body: JSON.stringify(body)
+  });
+  if (!r.ok) throw new Error(await r.text());
+  return r.json();
+}
+async function sbDelete(table, id) {
+  const r = await fetch(SUPABASE_URL + "/rest/v1/" + table + "?id=eq." + id, {
+    method: "DELETE", headers: SB_HEADS
+  });
+  if (!r.ok) throw new Error(await r.text());
+}
+
+//  DB 변환 함수 
+function rowToTeacher(r) {
+  return { id: r.id, name: r.name, teacherCode: r.teacher_code,
+    teacherPassword: r.teacher_password||"", email: r.email||"", classIds: r.class_ids||[] };
+}
+function rowToStudent(r) {
+  return { id: r.id, name: r.name, num: r.num, studentCode: r.student_code,
+    password: r.password||"", totalXp: r.total_xp||0, level: r.level||1,
+    profiles: r.profiles||Object.fromEntries(IB_PROFILES.map(p=>[p.id,0])),
+    atl: r.atl||Object.fromEntries(ATL_SKILLS.map(s=>[s.id,0])),
+    xpHistory: r.xp_history||[] };
+}
+function rowToRecord(r) {
+  return { id: r.id, studentId: r.student_id, date: r.date, content: r.content,
+    profiles: r.profiles||[], atl: r.atl||[], xp: r.xp||0, type: r.type||"AI",
+    comment: r.comment||"", profileScores: r.profile_scores||{}, atlScores: r.atl_scores||{} };
+}
+async function dbSaveStudent(s, classId) {
+  await sbUpsert("students", { id: s.id, class_id: classId, name: s.name, num: s.num,
+    student_code: s.studentCode, password: s.password||"", total_xp: s.totalXp,
+    level: s.level, profiles: s.profiles, atl: s.atl, xp_history: s.xpHistory });
+}
+async function dbSaveRecord(rec, classId) {
+  await sbUpsert("records", { id: rec.id, class_id: classId, student_id: rec.studentId,
+    date: rec.date, content: rec.content, profiles: rec.profiles, atl: rec.atl,
+    xp: rec.xp, type: rec.type, comment: rec.comment||"",
+    profile_scores: rec.profileScores||{}, atl_scores: rec.atlScores||{} });
+}
+
+//  Gemini API 키 (Supabase settings 테이블에서 로드) 
+const DEFAULT_GEMINI_KEY = ""; // Supabase settings 테이블에서 로드
+let GEMINI_API_KEY = DEFAULT_GEMINI_KEY;
+function getGeminiUrl() {
+  return "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent?key=" + GEMINI_API_KEY;
+}
+async function loadApiKey() {
+  try {
+    const rows = await sbGet("settings", "?key=eq.gemini_api_key");
+    if (rows && rows.length > 0 && rows[0].value) {
+      GEMINI_API_KEY = rows[0].value;
+    }
+  } catch(e) { console.warn("API 키 로드 실패, 기본값 사용"); }
+}
+async function saveApiKey(key) {
+  await sbUpsert("settings", { key: "gemini_api_key", value: key });
+  GEMINI_API_KEY = key;
+}
+
+const MASTER_ID = "admin";
+const DAILY_MAX_XP = 200;      // 하루 최대 획득 XP
+const PROFILE_MAX_XP = 100;    // 항목별 하루 최대 XP
+const MASTER_PW = "grow123";
+const APP_BASE_URL = typeof window !== "undefined"
+  ? window.location.origin + window.location.pathname.replace(/\/index\.html$/, "/")
+  : "https://ibgrow.app";
+
+// 
+// CONSTANTS
+// 
+const IB_PROFILES = [
+  { id: "inquirer",      icon: "\uD83D\uDD0D", label: "탐구하는 사람",   color: "#8B5CF6" },
+  { id: "knowledgeable", icon: "\uD83D\uDCDA", label: "지식이 있는 사람", color: "#3B82F6" },
+  { id: "thinker",       icon: "\uD83D\uDCA1", label: "생각하는 사람",   color: "#F59E0B" },
+  { id: "communicator",  icon: "\uD83D\uDCAC", label: "소통하는 사람",   color: "#10B981" },
+  { id: "principled",    icon: "\u2696\uFE0F", label: "원칙이 있는 사람", color: "#EF4444" },
+  { id: "open-minded",   icon: "\uD83C\uDF0D", label: "열린 마음",       color: "#06B6D4" },
+  { id: "caring",        icon: "\uD83E\uDD1D", label: "배려하는 사람",   color: "#EC4899" },
+  { id: "risk-taker",    icon: "\uD83D\uDE80", label: "도전하는 사람",   color: "#F97316" },
+  { id: "balanced",      icon: "\u26A1", label: "균형잡힌 사람",   color: "#84CC16" },
+  { id: "reflective",    icon: "\uD83D\uDCAD", label: "성찰하는 사람",   color: "#A78BFA" },
+];
+const ATL_SKILLS = [
+  { id: "thinking",      label: "사고 기술",     color: "#8B5CF6" },
+  { id: "communication", label: "소통 기술",     color: "#3B82F6" },
+  { id: "social",        label: "사회적 기술",   color: "#10B981" },
+  { id: "self-mgmt",     label: "자기관리 기술", color: "#EC4899" },
+  { id: "research",      label: "조사 기술",     color: "#F97316" },
+];
+const LEVELS = [
+  { lv: 1, name: "씨앗",   icon: "\uD83C\uDF31", xp: 0    },
+  { lv: 2, name: "새싹",   icon: "\uD83C\uDF3F", xp: 150  },
+  { lv: 3, name: "탐구자", icon: "\uD83D\uDD2D", xp: 400  },
+  { lv: 4, name: "발견자", icon: "\uD83D\uDCD6", xp: 800  },
+  { lv: 5, name: "사상가", icon: "\uD83D\uDCA1", xp: 1500 },
+  { lv: 6, name: "선구자", icon: "\uD83D\uDE80", xp: 2500 },
+  { lv: 7, name: "마스터", icon: "\uD83D\uDC51", xp: 4000 },
+];
+
+// 
+// HELPERS
+// 
+const getLv   = xp => { let l = LEVELS[0]; for (const x of LEVELS) { if (xp >= x.xp) l = x; } return l; };
+const getNext = xp => LEVELS.find(l => xp < l.xp) || null;
+const pad2    = n  => String(n).padStart(2, "0");
+const uid     = () => Math.random().toString(36).slice(2, 10).toUpperCase();
+
+function makeStudentCode(classCode, num) { return `${classCode}-${pad2(num)}`; }
+function makeStudentUrl(studentCode) { return `${APP_BASE_URL}?student=${encodeURIComponent(studentCode)}`; }
+
+function makeStudent(id, name, classCode, num, pw = "") {
+  return {
+    id, name, num,
+    studentCode: makeStudentCode(classCode, num),
+    password: pw,
+    totalXp: 0, level: 1,
+    profiles: Object.fromEntries(IB_PROFILES.map(p => [p.id, 0])),
+    atl:      Object.fromEntries(ATL_SKILLS.map(s => [s.id, 0])),
+    xpHistory: [], // [{date, xp, source}]
+  };
+}
+
+//  Clipboard helper (works without https) 
+function copyText(text) {
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).catch(() => fallbackCopy(text));
+  } else {
+    fallbackCopy(text);
+  }
+}
+function fallbackCopy(text) {
+  const ta = document.createElement("textarea");
+  ta.value = text;
+  ta.style.cssText = "position:fixed;top:0;left:0;opacity:0";
+  document.body.appendChild(ta);
+  ta.focus(); ta.select();
+  document.execCommand("copy");
+  document.body.removeChild(ta);
+}
+
+
+// 
+// AI API   Anthropic (works inside Claude artifacts) + Gemini (for deployment)
+// 
+
+// Detect environment: Claude artifact uses Anthropic API; deployed app uses Gemini
+const IS_ARTIFACT = typeof window !== "undefined" &&
+  (window.location.hostname === "claude.ai" ||
+   window.location.hostname.endsWith(".claude.ai") ||
+   window.location.hostname === "localhost" ||
+   window.location.origin.includes("claude"));
+
+//  Anthropic API call (works in Claude artifacts) 
+async function callAnthropic(prompt, imageBase64 = null, imageMime = null) {
+  const userContent = imageBase64
+    ? [
+        { type: "image", source: { type: "base64", media_type: imageMime, data: imageBase64 } },
+        { type: "text", text: prompt }
+      ]
+    : prompt;
+
+  const resp = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      model: "claude-sonnet-4-20250514",
+      max_tokens: 1000,
+      messages: [{ role: "user", content: userContent }],
+    }),
+  });
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({}));
+    throw new Error(err.error?.message || `HTTP ${resp.status}`);
+  }
+  const data = await resp.json();
+  return data.content?.find(b => b.type === "text")?.text || "";
+}
+
+//  Gemini API call (for deployed app) 
+async function callGemini(prompt, imageBase64 = null, imageMime = null) {
+  const parts = imageBase64
+    ? [{ inline_data: { mime_type: imageMime, data: imageBase64 } }, { text: prompt }]
+    : [{ text: prompt }];
+
+  const resp = await fetch(getGeminiUrl(), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      contents: [{ parts }],
+      generationConfig: { temperature: 0.9, maxOutputTokens: 2048 },
+    }),
+  });
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({}));
+    throw new Error(err.error?.message || `HTTP ${resp.status}`);
+  }
+  const data = await resp.json();
+  return data.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || "";
+}
+
+//  Unified AI call: Gemini only (deployed) 
+async function callAI(prompt, imageBase64 = null, imageMime = null) {
+  return await callGemini(prompt, imageBase64, imageMime);
+}
+
+// OCR: extract text from image or PDF
+async function ocrWithAI(base64, mimeType) {
+  const prompt = "이 이미지에서 텍스트를 읽어주세요. 손글씨가 있다면 최대한 정확하게 읽어주세요. 텍스트만 출력하고 설명은 하지 마세요.";
+  try {
+    const text = await callAI(prompt, base64, mimeType);
+    return text;
+  } catch (e) {
+    throw new Error("OCR 실패: " + e.message);
+  }
+}
+
+// IB Analysis: score student writing 0-50 per profile
+async function analyzeWithAI(text) {
+  if (!text || text.trim().length < 3) {
+    return {
+      profileScores: Object.fromEntries(IB_PROFILES.map(p => [p.id, 0])),
+      atlScores: Object.fromEntries(ATL_SKILLS.map(s => [s.id, 0])),
+      profiles: [], atl: [], xp: 0,
+      message: "글이 너무 짧아요. 오늘 있었던 일을 조금 더 써봐요! \u270F\uFE0F",
+    };
+  }
+
+  const prompt = `당신은 IB 초등 교육 전문가입니다. 학생의 글을 분석해서 각 IB 학습자상에 점수를 줍니다.
+
+학생 글: """${text}"""
+
+채점 규칙:
+- 글 내용과 직접 관련된 학습자상에만 점수 부여 (관련 없으면 반드시 0점)
+- 점수 범위: 0~50점
+- 5~10점: 약간 관련, 11~25점: 관련 있음, 26~40점: 강하게 관련, 41~50점: 핵심 주제
+- 여러 학습자상에 동시 점수 가능
+- ATL 기술도 동일 기준
+
+IB 학습자상:
+- inquirer: 호기심, 탐구, 배움에 열정
+- knowledgeable: 지식 습득, 다양한 학습
+- thinker: 논리적 사고, 문제 해결
+- communicator: 의사소통, 발표, 나눔
+- principled: 정직, 약속, 책임감
+- open-minded: 다양성 수용, 새로운 시각
+- caring: 배려, 도움, 공감
+- risk-taker: 도전, 새로운 시도
+- balanced: 몸과 마음의 균형
+- reflective: 자기 성찰, 개선점 인식
+
+ATL: thinking, communication, social, self-mgmt, research
+
+JSON만 출력 (설명, 마크다운, 개행 없이 한 줄로):
+{"profileScores":{"inquirer":0,"knowledgeable":0,"thinker":0,"communicator":0,"principled":0,"open-minded":0,"caring":0,"risk-taker":0,"balanced":0,"reflective":0},"atlScores":{"thinking":0,"communication":0,"social":0,"self-mgmt":0,"research":0},"message":"격려 메시지 1~2문장","feedback":"어떻게 쓰면 더 높은 점수를 받을 수 있는지 구체적인 조언 2~3문장. 예: 배려하는 사람 항목을 더 받으려면 친구를 도와준 경험을 추가해보세요!"}`;
+
+  try {
+    const raw = await callAI(prompt);
+    // JSON 추출 - 여러 방법으로 시도
+    let parsed = null;
+    const clean = raw.replace(/```json|```/g, "").trim();
+    // 방법1: {...} 패턴 추출
+    const jsonMatch = clean.match(/\{[\s\S]*\}/);
+    const jsonStr = jsonMatch ? jsonMatch[0] : clean;
+    // 방법2: 제어문자 제거 후 파싱
+    const sanitized = jsonStr.replace(/[\x00-\x1F\x7F]/g, " ").replace(/,\s*([}\]])/g, "$1");
+    try { parsed = JSON.parse(sanitized); } catch(e1) {
+      // 방법3: 더 공격적인 정리
+      const strict = sanitized.replace(/'/g, "\"").replace(/([{,]\s*)(\w+):/g, '$1"$2":');
+      try { parsed = JSON.parse(strict); } catch(e2) {
+        throw new Error("JSON \ud30c\uc2f1 \uc2e4\ud328: " + e2.message + " / \uc6d0\ubcf8: " + raw.slice(0, 100));
+      }
+    }
+
+    // Validate & extract
+    const profileScores = parsed.profileScores || {};
+    const atlScores = parsed.atlScores || {};
+
+    // profiles array: only those with score > 0
+    const profiles = Object.entries(profileScores).filter(([, v]) => v > 0).map(([k]) => k);
+    const atl      = Object.entries(atlScores).filter(([, v]) => v > 0).map(([k]) => k);
+
+    // totalXp = sum of all profile scores
+    const totalXp = Math.min(100, Object.values(profileScores).reduce((s, v) => s + (v || 0), 0));
+
+    return {
+      profileScores,
+      atlScores,
+      profiles,
+      atl,
+      xp: totalXp,
+      message: parsed.message || "오늘도 잘 기록했어요! \uD83C\uDF31",
+      feedback: parsed.feedback || "",
+    };
+  } catch (e) {
+    console.error("AI analysis error:", e);
+    return {
+      profileScores: Object.fromEntries(IB_PROFILES.map(p => [p.id, 0])),
+      atlScores: Object.fromEntries(ATL_SKILLS.map(s => [s.id, 0])),
+      profiles: [],
+      atl: [],
+      xp: 0,
+      message: "AI 분석 중 오류가 발생했어요. (오류: " + e.message + ")",
+      error: true,
+    };
+  }
+}
+
+// 
+// SHARED UI
+// 
+function RadarChart({ data, labels, size = 200 }) {
+  const cx = size / 2, cy = size / 2, r = size * 0.36, n = labels.length;
+  const angles = labels.map((_, i) => (Math.PI * 2 * i) / n - Math.PI / 2);
+  const max = Math.max(...data, 1);
+  const pts = data.map((v, i) => [cx + r * (v / max) * Math.cos(angles[i]), cy + r * (v / max) * Math.sin(angles[i])]);
+  return (
+    <svg width={size} height={size} className="mx-auto">
+      {[.25, .5, .75, 1].map(ratio => (
+        <polygon key={ratio} points={angles.map(a => [cx + r * ratio * Math.cos(a), cy + r * ratio * Math.sin(a)].join(",")).join(" ")} fill="none" stroke="#E5E7EB" strokeWidth="1" />
+      ))}
+      {angles.map((a, i) => <line key={i} x1={cx} y1={cy} x2={cx + r * Math.cos(a)} y2={cy + r * Math.sin(a)} stroke="#E5E7EB" strokeWidth="1" />)}
+      <polygon points={pts.map(p => p.join(",")).join(" ")} fill="rgba(139,92,246,0.18)" stroke="#8B5CF6" strokeWidth="2" strokeLinejoin="round" />
+      {labels.map((label, i) => {
+        const lx = cx + (r + 20) * Math.cos(angles[i]), ly = cy + (r + 20) * Math.sin(angles[i]);
+        return <text key={i} x={lx} y={ly} textAnchor="middle" dominantBaseline="middle" fontSize="9" fill="#6B7280">{label}</text>;
+      })}
+    </svg>
+  );
+}
+
+function ATLBars({ atl }) {
+  const max = Math.max(...Object.values(atl), 1);
+  return (
+    <div className="space-y-2">
+      {ATL_SKILLS.map(s => (
+        <div key={s.id} className="flex items-center gap-2">
+          <span className="text-xs text-gray-600 w-20 shrink-0">{s.label}</span>
+          <div className="flex-1 h-3 bg-gray-100 rounded-full overflow-hidden">
+            <div className="h-full rounded-full transition-all" style={{ width: `${(atl[s.id] / max) * 100}%`, backgroundColor: s.color }} />
+          </div>
+          <span className="text-xs font-semibold w-8 text-right" style={{ color: s.color }}>{atl[s.id]}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// FIX #10: Level-up popup
+function LevelUpPopup({ fromLv, toLv, onClose }) {
+  if (!fromLv || !toLv) return null;
+  return (
+    <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4">
+      <div className="bg-white rounded-3xl p-8 max-w-xs w-full shadow-2xl text-center relative overflow-hidden">
+        <div className="absolute inset-0 pointer-events-none">
+          {[...Array(12)].map((_, i) => (
+            <div key={i} className="absolute text-2xl animate-bounce" style={{
+              left: `${Math.random() * 90}%`, top: `${Math.random() * 80}%`,
+              animationDelay: `${i * 0.1}s`, animationDuration: `${0.5 + Math.random()}s`
+            }}>{"\u2B50\uD83C\uDF89\u2728\uD83C\uDF1F"[i % 4]}</div>
+          ))}
+        </div>
+        <div className="relative z-10">
+          <div className="text-6xl mb-2 animate-bounce">{toLv.icon}</div>
+          <p className="text-yellow-500 font-bold text-lg mb-1">레벨 업! </p>
+          <div className="flex items-center justify-center gap-3 mb-3">
+            <div className="text-center"><div className="text-3xl">{fromLv.icon}</div><div className="text-xs text-gray-500">Lv.{fromLv.lv} {fromLv.name}</div></div>
+            <div className="text-2xl text-yellow-400"></div>
+            <div className="text-center"><div className="text-3xl">{toLv.icon}</div><div className="text-xs text-purple-600 font-bold">Lv.{toLv.lv} {toLv.name}</div></div>
+          </div>
+          <p className="text-sm text-gray-600 mb-4">축하해요! 새로운 단계로 성장했어요! </p>
+          <button onClick={onClose} className="w-full bg-gradient-to-r from-yellow-400 to-orange-400 text-white font-bold py-3 rounded-2xl hover:from-yellow-500 hover:to-orange-500 transition-all">
+            계속하기! 
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ResultPopup({ result, onClose }) {
+  if (!result) return null;
+  const scoredProfiles = IB_PROFILES.filter(p => (result.profileScores?.[p.id] || 0) > 0);
+  return (
+    <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-40 p-4">
+      <div className="bg-white rounded-3xl p-6 max-w-sm w-full shadow-2xl text-center max-h-[90vh] overflow-y-auto">
+        <div className="text-5xl mb-2">{getLv(result.totalXp || 0).icon}</div>
+        <h2 className="text-xl font-bold text-gray-800 mb-1">잘했어요! </h2>
+        {(result.actualXp > 0 || result.xp > 0) ? (
+          <>
+            <div className="mb-3">
+              <p className="text-3xl font-extrabold text-yellow-400">+{result.actualXp ?? result.xp} XP </p>
+              {result.todayEarnedXp !== undefined && (
+                <div className="mt-1">
+                  <div className="flex justify-between text-xs text-gray-400 mb-1">
+                    <span>오늘 사용</span>
+                    <span>{result.todayEarnedXp} / {DAILY_MAX_XP} XP</span>
+                  </div>
+                  <div className="h-2 bg-gray-100 rounded-full overflow-hidden">
+                    <div className="h-full bg-gradient-to-r from-blue-400 to-purple-500 rounded-full transition-all"
+                      style={{width: Math.min(100, (result.todayEarnedXp / DAILY_MAX_XP) * 100) + "%"}} />
+                  </div>
+                </div>
+              )}
+              {result.hints && result.hints.length > 0 && result.todayEarnedXp < DAILY_MAX_XP && (
+                <div className="mt-2 bg-green-50 rounded-xl p-2">
+                  <p className="text-xs text-green-600">더 받을 수 있는 역량:</p>
+                  <p className="text-xs font-bold text-green-700">{result.hints.join(", ")}</p>
+                </div>
+              )}
+            </div>
+            <div className="space-y-1.5 mb-3 text-left">
+              {scoredProfiles.map(p => (
+                <div key={p.id} className="flex items-center gap-2 bg-gray-50 rounded-xl px-3 py-1.5">
+                  <span className="text-lg">{p.icon}</span>
+                  <span className="text-xs text-gray-700 flex-1">{p.label}</span>
+                  <span className="text-xs font-bold text-white px-2 py-0.5 rounded-full" style={{ backgroundColor: p.color }}>+{result.profileScores[p.id]}점</span>
+                </div>
+              ))}
+            </div>
+          </>
+        ) : (
+          <p className="text-sm text-gray-500 mb-3 bg-yellow-50 rounded-2xl p-3">글이 더 구체적이면 더 많은 점수를 받을 수 있어요! </p>
+        )}
+        <p className="text-sm text-gray-600 mb-3 bg-purple-50 rounded-2xl p-3">{result.message}</p>
+        {result.feedback && (
+          <div className="mb-4 bg-orange-50 border border-orange-100 rounded-2xl p-3 text-left">
+            <p className="text-xs font-bold text-orange-600 mb-1">{"이렇게 써보세요!"}</p>
+            <p className="text-xs text-orange-700 leading-relaxed">{result.feedback}</p>
+          </div>
+        )}
+        <button onClick={onClose} className="w-full bg-yellow-400 hover:bg-yellow-500 text-white font-bold py-3 rounded-2xl transition-colors">계속하기 </button>
+      </div>
+    </div>
+  );
+}
+
+// FIX #3: OCR Upload with better error display
+function FileOCRUpload({ onOCRResult }) {
+  const [status, setStatus] = useState("idle");
+  const [file, setFile] = useState(null);
+  const [preview, setPreview] = useState(null);
+  const [ocrText, setOcrText] = useState("");
+  const [errMsg, setErrMsg] = useState("");
+  const ref = useRef();
+
+  function pick(f) {
+    if (!f) return;
+    const allowed = ["image/jpeg","image/png","image/webp","image/gif","application/pdf"];
+    if (!allowed.includes(f.type)) { alert("JPG\u00B7PNG\u00B7WEBP\u00B7GIF\u00B7PDF만 지원해요!"); return; }
+    setFile(f); setStatus("preview"); setOcrText(""); setErrMsg("");
+    setPreview(f.type.startsWith("image/") ? URL.createObjectURL(f) : null);
+  }
+
+  async function doOCR() {
+    setStatus("loading"); setErrMsg("");
+    try {
+      const b64 = await new Promise((res, rej) => {
+        const reader = new FileReader();
+        reader.onload = () => res(reader.result.split(",")[1]);
+        reader.onerror = rej;
+        reader.readAsDataURL(file);
+      });
+      const t = await ocrWithAI(b64, file.type);
+      if (t) { setOcrText(t); setStatus("done"); }
+      else { setErrMsg("텍스트를 찾지 못했어요."); setStatus("error"); }
+    } catch (e) { setErrMsg(e.message); setStatus("error"); }
+  }
+
+  function apply() { onOCRResult(ocrText); reset(); }
+  function reset() { setFile(null); setPreview(null); setOcrText(""); setStatus("idle"); setErrMsg(""); if (ref.current) ref.current.value = ""; }
+
+  return (
+    <div className="bg-gradient-to-br from-blue-50 to-indigo-50 rounded-2xl p-3 border border-blue-100">
+      <p className="text-xs font-semibold text-blue-700 mb-2"> 손글씨 사진PDF 올리기 <span className="text-gray-400 font-normal"> AI가 자동으로 읽어줘요!</span></p>
+      {status === "idle" && (
+        <div className="border-2 border-dashed border-blue-200 rounded-xl p-4 text-center cursor-pointer hover:border-blue-400 hover:bg-white transition-all"
+          onClick={() => ref.current?.click()} onDragOver={e => e.preventDefault()} onDrop={e => { e.preventDefault(); pick(e.dataTransfer?.files?.[0]); }}>
+          <div className="text-3xl mb-1"></div>
+          <p className="text-xs font-medium text-gray-600">탭하거나 파일을 끌어다 놓아요</p>
+          <p className="text-xs text-gray-400 mt-0.5">JPG  PNG  PDF 지원</p>
+        </div>
+      )}
+      {(status === "preview" || status === "loading") && (
+        <div className="space-y-2">
+          <div className="bg-white rounded-xl p-2 flex items-center gap-3 border border-blue-100">
+            {preview ? <img src={preview} alt="" className="h-16 w-16 object-cover rounded-lg shrink-0" /> : <div className="h-16 w-16 bg-blue-50 rounded-lg flex items-center justify-center text-2xl shrink-0"></div>}
+            <div className="flex-1 min-w-0"><p className="text-xs font-semibold text-gray-700 truncate">{file?.name}</p><p className="text-xs text-gray-400">{((file?.size || 0) / 1024).toFixed(1)} KB</p></div>
+          </div>
+          <div className="flex gap-2">
+            <button onClick={doOCR} disabled={status === "loading"} className="flex-1 bg-blue-500 hover:bg-blue-600 disabled:bg-blue-300 text-white font-bold py-2 rounded-xl text-xs transition-colors flex items-center justify-center gap-1">
+              {status === "loading" ? <><span></span> 글자 읽는 중...</> : <><span></span> AI로 글자 인식</>}
+            </button>
+            <button onClick={reset} disabled={status === "loading"} className="px-3 py-2 rounded-xl bg-gray-100 hover:bg-gray-200 text-xs text-gray-500">취소</button>
+          </div>
+        </div>
+      )}
+      {status === "done" && (
+        <div className="space-y-2">
+          <div className="bg-white rounded-xl p-3 border border-green-100"><p className="text-xs font-semibold text-green-600 mb-1"> 인식된 텍스트</p><p className="text-xs text-gray-700 leading-relaxed whitespace-pre-wrap max-h-24 overflow-y-auto">{ocrText}</p></div>
+          <div className="flex gap-2"><button onClick={apply} className="flex-1 bg-green-500 hover:bg-green-600 text-white font-bold py-2 rounded-xl text-xs"> 글쓰기 칸에 넣기</button><button onClick={reset} className="px-3 py-2 rounded-xl bg-gray-100 text-xs text-gray-500">다시</button></div>
+        </div>
+      )}
+      {status === "error" && (
+        <div className="space-y-2">
+          <div className="bg-red-50 rounded-xl p-3 border border-red-100"><p className="text-xs text-red-600 font-semibold"> 인식 실패</p><p className="text-xs text-red-500 mt-0.5">{errMsg}</p></div>
+          <button onClick={reset} className="w-full py-2 rounded-xl bg-gray-100 text-xs text-gray-600">다시 시도</button>
+        </div>
+      )}
+      <input ref={ref} type="file" accept="image/*,application/pdf" className="hidden" onChange={e => pick(e.target.files?.[0])} />
+    </div>
+  );
+}
+
+// FIX #3: Copy button component
+function CopyButton({ text, label = "복사", className = "" }) {
+  const [copied, setCopied] = useState(false);
+  function handle() {
+    copyText(text);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1500);
+  }
+  return (
+    <button onClick={handle} className={`text-xs px-2 py-0.5 rounded transition-colors ${copied ? "bg-green-100 text-green-600" : "bg-blue-100 hover:bg-blue-200 text-blue-600"} ${className}`}>
+      {copied ? "\u2705 복사됨" : label}
+    </button>
+  );
+}
+
+// FIX #11: Simple line chart for XP growth
+function XPLineChart({ history, width = 280, height = 100 }) {
+  if (!history || history.length < 2) return <p className="text-xs text-gray-400 text-center py-4">기록이 더 필요해요</p>;
+  const maxXp = Math.max(...history.map(h => h.xp), 1);
+  const pts = history.map((h, i) => {
+    const x = 20 + (i / (history.length - 1)) * (width - 40);
+    const y = height - 20 - ((h.xp / maxXp) * (height - 30));
+    return [x, y];
+  });
+  const path = pts.map((p, i) => `${i === 0 ? "M" : "L"}${p[0]},${p[1]}`).join(" ");
+  const area = `${path} L${pts[pts.length-1][0]},${height-20} L${pts[0][0]},${height-20} Z`;
+  return (
+    <svg width={width} height={height} className="w-full">
+      <defs><linearGradient id="xpGrad" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="#8B5CF6" stopOpacity="0.3"/><stop offset="100%" stopColor="#8B5CF6" stopOpacity="0.0"/></linearGradient></defs>
+      <path d={area} fill="url(#xpGrad)" />
+      <path d={path} fill="none" stroke="#8B5CF6" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+      {pts.map((p, i) => <circle key={i} cx={p[0]} cy={p[1]} r="3" fill="#8B5CF6" />)}
+      {history.map((h, i) => (
+        <text key={i} x={pts[i][0]} y={height - 5} textAnchor="middle" fontSize="8" fill="#9CA3AF">{h.date?.slice(5)}</text>
+      ))}
+      <text x={pts[pts.length-1][0]} y={pts[pts.length-1][1] - 6} textAnchor="middle" fontSize="9" fill="#7C3AED" fontWeight="bold">{history[history.length-1].xp}</text>
+    </svg>
+  );
+}
+
+// 
+// STUDENT APP
+// 
+
+// ── AI fetch helpers ──────────────────────────────────────────────
+async function fetchDiarySuggestion(profile) {
+  const seeds = ["학교", "급식", "수업", "쉬는시간", "체육", "미술", "친구", "집", "방과후", "도서관", "운동장", "점심시간"];
+  const seed = seeds[Math.floor(Math.random() * seeds.length)];
+  const prompt = `당신은 IB 초등학교 교사입니다. 학생이 "${profile.label}" 학습자상 카드를 눌렀습니다.
+오늘의 키워드 힌트: ${seed}
+
+이 학습자상에 어울리는 일기 글쓰기 질문 1개와, 초등학생이 이어쓸 수 있는 자연스러운 예시 첫 문장 1개를 생성해주세요.
+규칙:
+- 질문은 오늘 있었던 구체적인 경험을 떠올릴 수 있게 해주세요
+- 키워드 힌트를 참고해서 매번 다른 상황의 질문을 만들어주세요
+- 예시 첫 문장은 초등학생답게 짧고 자연스럽게, 구체적인 상황으로
+- 반드시 JSON만 출력 (설명, 코드블록 없이): {"question":"질문 내용","example":"예시 첫 문장"}`;
+  const raw = await callAI(prompt);
+  const clean = raw.replace(/```json|```/g, "").trim();
+  const match = clean.match(/\{[\s\S]*?\}/);
+  if (!match) throw new Error("AI 응답 형식 오류: " + clean.slice(0, 80));
+  return JSON.parse(match[0]);
+}
+
+async function fetchStorySuggestion(profile) {
+  const characters = ["꼬마 여우", "작은 별", "용감한 개구리", "수줍은 다람쥐", "호기심 많은 고양이", "느린 거북이", "말 많은 앵무새", "겁쟁이 사자 새끼", "친절한 나무", "외로운 달팽이"];
+  const settings = ["숲 속 마을", "바닷속 왕국", "구름 위 나라", "마법 도서관", "작은 섬", "별빛 정원", "눈 덮인 산", "봄꽃 들판"];
+  const char = characters[Math.floor(Math.random() * characters.length)];
+  const setting = settings[Math.floor(Math.random() * settings.length)];
+  const prompt = `당신은 어린이 동화 작가입니다. "${profile.label}" IB 학습자상을 주제로 한 동화의 시작 부분을 써주세요.
+주인공 힌트: ${char} / 배경 힌트: ${setting}
+
+규칙:
+- 초등학생이 읽기 좋은 동화체 문장 (반말, 친근한 어투)
+- 주제 태그 1개 (예: [주제: 용기와 새로운 시도])
+- 이야기를 시작하는 문장 3~4개 (주인공 소개 + 상황 설정 + 행동의 계기)
+- 마지막 문장은 학생이 이어쓰고 싶게 궁금증이나 기대감을 남길 것
+- 반드시 JSON만 출력 (설명, 코드블록 없이): {"theme":"주제 태그 내용","story":"동화 3~4문장 (문장 사이 공백 한 칸)"}`;
+  const raw = await callAI(prompt);
+  const clean = raw.replace(/```json|```/g, "").trim();
+  const match = clean.match(/\{[\s\S]*?\}/);
+  if (!match) throw new Error("AI 응답 형식 오류: " + clean.slice(0, 80));
+  return JSON.parse(match[0]);
+}
+
+// ── Popup component (supports both diary & story modes) ───────────
+function ProfileSuggestionPopup({ profile, writeMode, suggestion, loadingSuggestion, onClose, onSendToInput }) {
+  if (!profile) return null;
+  const isDiary = writeMode === "diary";
+  return (
+    <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/40 px-4 pb-6" onClick={onClose}>
+      <div className="bg-white rounded-3xl shadow-2xl w-full max-w-sm p-5 space-y-4" onClick={e => e.stopPropagation()}>
+        {/* Header */}
+        <div className="flex items-center gap-3">
+          <div className="w-12 h-12 rounded-2xl flex items-center justify-center text-2xl shadow-sm" style={{ backgroundColor: profile.color + "22" }}>
+            {profile.icon}
+          </div>
+          <div>
+            <p className="text-xs font-medium" style={{ color: profile.color }}>{isDiary ? "✏️ 일기 쓰기" : "📖 이야기 쓰기"}</p>
+            <p className="font-bold text-gray-800">{profile.label}</p>
+          </div>
+          <button onClick={onClose} className="ml-auto text-gray-300 hover:text-gray-500 text-xl leading-none">×</button>
+        </div>
+
+        {loadingSuggestion ? (
+          <div className="flex flex-col items-center py-8 gap-3">
+            <div className="w-8 h-8 rounded-full animate-spin" style={{border:"3px solid #e9d5ff", borderTopColor: profile.color}}></div>
+            <p className="text-xs text-gray-400">{isDiary ? "AI가 질문을 만들고 있어요..." : "AI가 동화를 만들고 있어요..."}</p>
+          </div>
+        ) : suggestion?._error ? (
+          <div className="bg-red-50 rounded-2xl px-4 py-4 text-center">
+            <p className="text-2xl mb-2">⚠️</p>
+            <p className="text-sm text-red-600 font-medium">{suggestion._error}</p>
+          </div>
+        ) : suggestion ? isDiary ? (
+          <>
+            <div className="bg-purple-50 rounded-2xl px-4 py-3">
+              <p className="text-xs font-semibold text-purple-500 mb-1">✏️ 오늘의 글쓰기 질문</p>
+              <p className="text-sm font-medium text-gray-800 leading-relaxed">{suggestion.question}</p>
+            </div>
+            <div className="bg-yellow-50 rounded-2xl px-4 py-3">
+              <p className="text-xs font-semibold text-yellow-600 mb-1">💡 예시 첫 문장</p>
+              <p className="text-sm text-gray-700 leading-relaxed italic">"{suggestion.example}"</p>
+            </div>
+            <button onClick={() => { onSendToInput(suggestion.example); onClose(); }}
+              className="w-full py-3 rounded-2xl font-bold text-sm text-white shadow-md transition-all active:scale-95"
+              style={{ backgroundColor: profile.color }}>
+              📝 입력칸으로 보내 이어쓰기
+            </button>
+          </>
+        ) : (
+          <>
+            <div className="rounded-2xl px-4 py-1" style={{ backgroundColor: profile.color + "11", border: `1.5px solid ${profile.color}33` }}>
+              <p className="text-xs font-bold mt-3 mb-1" style={{ color: profile.color }}>📌 [{suggestion.theme}]</p>
+              <p className="text-sm text-gray-800 leading-relaxed pb-3" style={{ lineHeight: "1.9" }}>{suggestion.story}</p>
+            </div>
+            <div className="bg-amber-50 rounded-2xl px-4 py-3 border border-amber-100">
+              <p className="text-xs text-amber-600 font-semibold">✨ 이 다음 이야기를 이어서 써봐요!</p>
+            </div>
+            <button onClick={() => { onSendToInput("[" + suggestion.theme + "]\n" + suggestion.story + " "); onClose(); }}
+              className="w-full py-3 rounded-2xl font-bold text-sm text-white shadow-md transition-all active:scale-95"
+              style={{ backgroundColor: profile.color }}>
+              📖 입력칸으로 보내 이어쓰기
+            </button>
+          </>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+function StudentApp({ student, classData, onAddRecord, onDeleteRecord, onLogout }) {
+  const [tab, setTab] = useState("record");
+  const [writeMode, setWriteMode] = useState("diary"); // "diary" | "story"
+  const [text, setText] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [result, setResult] = useState(null);
+  const [levelUp, setLevelUp] = useState(null);
+  const [activeProfile, setActiveProfile] = useState(null);
+  const [suggestion, setSuggestion] = useState(null);
+  const [loadingSuggestion, setLoadingSuggestion] = useState(false);
+
+  async function handleProfileCardClick(profile) {
+    setActiveProfile(profile);
+    setSuggestion(null);
+    setLoadingSuggestion(true);
+
+    // Gemini API 키 확인
+    if (!GEMINI_API_KEY) {
+      await loadApiKey();
+    }
+    if (!GEMINI_API_KEY) {
+      setSuggestion({ _error: "AI 키가 설정되지 않았어요. 선생님께 문의해주세요." });
+      setLoadingSuggestion(false);
+      return;
+    }
+
+    try {
+      const s = writeMode === "diary"
+        ? await fetchDiarySuggestion(profile)
+        : await fetchStorySuggestion(profile);
+      setSuggestion(s);
+    } catch(e) {
+      setSuggestion({ _error: "AI 응답 실패: " + (e.message || "알 수 없는 오류") });
+    }
+    setLoadingSuggestion(false);
+  }
+
+  function handleSendToInput(text) {
+    setText(prev => prev ? prev + " " + text : text);
+  }
+
+  const lv = getLv(student.totalXp), next = getNext(student.totalXp);
+  const pct = next ? Math.round(((student.totalXp - lv.xp) / (next.xp - lv.xp)) * 100) : 100;
+  const myRecords = classData.records
+    .filter(r => r.studentId === student.id)
+    .sort((a, b) => (b.date > a.date ? 1 : b.date < a.date ? -1 : 0));
+
+  async function handleSave() {
+    if (!text.trim() || loading) return;
+    setLoading(true);
+    const today = new Date().toISOString().slice(0, 10);
+    const oldLv = getLv(student.totalXp);
+
+    // 오늘 내 기록들
+    const todayRecs = classData.records.filter(r => r.studentId === student.id && r.date === today && r.type === "AI");
+
+    // 항목별 오늘 받은 최고 점수
+    const todayBestByProfile = {};
+    IB_PROFILES.forEach(p => {
+      const best = todayRecs.length > 0
+        ? Math.max(0, ...todayRecs.map(r => r.profileScores?.[p.id] || 0))
+        : 0;
+      todayBestByProfile[p.id] = Math.min(best, PROFILE_MAX_XP);
+    });
+
+    // 오늘 총 획득 XP (항목별 최고점 합산)
+    const todayEarnedXp = Math.min(
+      Object.values(todayBestByProfile).reduce((s, v) => s + v, 0),
+      DAILY_MAX_XP
+    );
+
+    if (todayEarnedXp >= DAILY_MAX_XP) {
+      alert("오늘 최대 " + DAILY_MAX_XP + "XP를 이미 달성했어요! 내일 또 도전해봐요!");
+      setLoading(false);
+      return;
+    }
+
+    const analysis = await analyzeWithAI(text);
+
+    // 항목별 실제 추가 XP 계산
+    const actualProfileScores = {};
+    let actualXp = 0;
+    IB_PROFILES.forEach(p => {
+      const rawScore = Math.min(analysis.profileScores?.[p.id] || 0, PROFILE_MAX_XP);
+      const prevBest = todayBestByProfile[p.id] || 0;
+      const gain = Math.max(0, rawScore - prevBest);
+      actualProfileScores[p.id] = gain;
+      actualXp += gain;
+    });
+
+    // 총합이 하루 최대 초과하면 비례 축소
+    const remaining = DAILY_MAX_XP - todayEarnedXp;
+    if (actualXp > remaining) actualXp = remaining;
+
+    // 남은 항목별 힌트 (아직 점수가 낮은 항목)
+    const hints = IB_PROFILES
+      .filter(p => todayBestByProfile[p.id] < PROFILE_MAX_XP)
+      .sort((a, b) => todayBestByProfile[a.id] - todayBestByProfile[b.id])
+      .slice(0, 3)
+      .map(p => p.label);
+
+    const rec = {
+      id: Date.now(), studentId: student.id,
+      date: today, content: text,
+      profiles: analysis.profiles, atl: analysis.atl,
+      xp: analysis.xp, actualXp: actualXp,
+      profileScores: analysis.profileScores,
+      atlScores: analysis.atlScores, type: "AI",
+    };
+
+    const newTotalXp = student.totalXp + actualXp;
+    onAddRecord(rec, actualXp, analysis.profileScores, analysis.atlScores);
+    setResult({
+      ...analysis, xp: analysis.xp, actualXp,
+      todayEarnedXp: todayEarnedXp + actualXp,
+      totalXp: newTotalXp,
+      todayBestByProfile, hints,
+    });
+    const newLv = getLv(newTotalXp);
+    if (newLv.lv > oldLv.lv) {
+      setTimeout(() => setLevelUp({ fromLv: oldLv, toLv: newLv }), 800);
+    }
+    setText(""); setLoading(false);
+  }
+
+  return (
+    <div className="min-h-screen bg-gradient-to-b from-purple-50 to-green-50">
+      {/* Header */}
+      <div className="bg-white shadow-sm px-4 py-3 flex items-center justify-between sticky top-0 z-10">
+        <div className="flex items-center gap-3">
+          <div className="w-10 h-10 rounded-full bg-gradient-to-br from-green-200 to-green-400 flex items-center justify-center text-xl shadow">{lv.icon}</div>
+          <div>
+            <div className="font-bold text-gray-800 text-sm flex items-center gap-2">{student.name}
+              <span className="text-xs bg-purple-100 text-purple-600 px-2 py-0.5 rounded-full">Lv.{lv.lv} {lv.name}</span>
+            </div>
+            <div className="text-xs text-gray-400">{classData.code}  {classData.name}</div>
+          </div>
+        </div>
+        <button onClick={onLogout} className="text-xs text-gray-400 hover:text-gray-600">로그아웃</button>
+      </div>
+
+      {/* XP Bar */}
+      <div className="px-4 pt-4">
+        <div className="text-center mb-2">
+          <p className="text-sm text-gray-500">안녕, <b className="text-gray-700">{student.name}</b>! </p>
+        </div>
+        <div className="bg-white rounded-2xl p-4 shadow-sm border border-purple-100 mb-4">
+          <div className="flex justify-between text-xs text-gray-400 mb-1"><span>{student.totalXp} XP</span><span>{next ? next.xp : "MAX"} XP</span></div>
+          <div className="h-5 bg-gray-100 rounded-full overflow-hidden relative">
+            <div className="h-full rounded-full bg-gradient-to-r from-yellow-300 to-orange-300 transition-all duration-700" style={{ width: `${pct}%` }} />
+            <span className="absolute inset-0 flex items-center justify-center text-xs font-bold text-gray-700">내가 모은 경험치 </span>
+          </div>
+          {(() => {
+            const today = new Date().toISOString().slice(0, 10);
+            const todayRecs = classData.records.filter(r => r.studentId === student.id && r.date === today && r.type === "AI");
+            // 항목별 최고점 합산으로 오늘 XP 계산
+            const todayEarned = Math.min(DAILY_MAX_XP, IB_PROFILES.reduce((sum, p) => {
+              const best = todayRecs.length > 0 ? Math.max(0, ...todayRecs.map(r => r.profileScores?.[p.id] || 0)) : 0;
+              return sum + Math.min(best, PROFILE_MAX_XP);
+            }, 0));
+            return todayRecs.length > 0 ? (
+              <div className="mt-2 bg-blue-50 rounded-xl px-3 py-2">
+                <div className="flex justify-between items-center mb-1">
+                  <span className="text-xs text-blue-600">{"오늘 가져간 XP"}</span>
+                  <span className="text-xs font-bold text-blue-600">{todayEarned} / {DAILY_MAX_XP}</span>
+                </div>
+                <div className="h-1.5 bg-blue-100 rounded-full overflow-hidden">
+                  <div className="h-full bg-blue-400 rounded-full" style={{width: Math.min(100,(todayEarned/DAILY_MAX_XP)*100)+"%"}} />
+                </div>
+              </div>
+            ) : null;
+          })()}
+          {next && <p className="text-xs text-gray-400 text-center mt-1">다음 레벨까지 {next.xp - student.totalXp} XP 남아요! </p>}
+        </div>
+      </div>
+
+      {/* Tabs */}
+      <div className="px-4 mb-4">
+        <div className="bg-white rounded-2xl p-1 flex shadow-sm border border-gray-100">
+          {[{ id: "record", l: "\u270F\uFE0F 기록하기" }, { id: "growth", l: "\uD83C\uDF31 내 성장" }].map(t => (
+            <button key={t.id} onClick={() => setTab(t.id)} className={`flex-1 py-2 rounded-xl text-sm font-medium transition-all ${tab === t.id ? "bg-purple-500 text-white shadow" : "text-gray-500"}`}>{t.l}</button>
+          ))}
+        </div>
+      </div>
+
+      {tab === "record" ? (
+        <div className="px-4 pb-8 space-y-4">
+          <div className="bg-white rounded-3xl p-4 shadow-sm border border-gray-100">
+            {/* Write mode toggle */}
+            <div className="flex bg-gray-100 rounded-2xl p-1 mb-4">
+              <button
+                onClick={() => setWriteMode("diary")}
+                className={`flex-1 py-2 rounded-xl text-sm font-bold transition-all ${writeMode === "diary" ? "bg-white shadow text-purple-600" : "text-gray-400"}`}
+              >✏️ 일기 쓰기</button>
+              <button
+                onClick={() => setWriteMode("story")}
+                className={`flex-1 py-2 rounded-xl text-sm font-bold transition-all ${writeMode === "story" ? "bg-white shadow text-orange-500" : "text-gray-400"}`}
+              >📖 이야기 쓰기</button>
+            </div>
+            <h3 className="text-center font-bold text-gray-700 mb-1">
+              {writeMode === "diary" ? "오늘 나는 어떤 일을 했나요?" : "어떤 이야기를 써볼까요?"}
+            </h3>
+            <p className="text-center text-xs text-gray-400 mb-3">
+              {writeMode === "diary" ? "아래 카드를 누르면 일기 쓰기 질문이 나와요 ✏️" : "아래 카드를 누르면 동화 첫 부분이 만들어져요 📖"}
+            </p>
+            <div className="grid grid-cols-5 gap-2">
+              {IB_PROFILES.map(p => (
+                <div key={p.id}
+                  onClick={() => handleProfileCardClick(p)}
+                  className="flex flex-col items-center gap-1 rounded-2xl p-2 cursor-pointer transition-all active:scale-95 hover:shadow-md"
+                  style={{ backgroundColor: p.color + "18", border: `1.5px solid ${p.color}33` }}
+                >
+                  <span className="text-xl">{p.icon}</span>
+                  <span className="text-xs text-gray-600 text-center leading-tight">{p.label}</span>
+                </div>
+              ))}
+            </div>
+            <p className="text-center text-xs text-gray-400 mt-2">👆 카드를 누르면 글쓰기 도움말이 나와요!</p>
+          </div>
+          <FileOCRUpload onOCRResult={t => setText(prev => prev ? prev + "\n" + t : t)} />
+          <div className="bg-white rounded-3xl p-4 shadow-sm border border-gray-100">
+            <div className="flex items-center justify-between mb-1">
+              <p className="text-sm font-medium text-gray-700">
+                {writeMode === "diary" ? "✏️ 오늘 있었던 일을 자유롭게 써봐요!" : "📖 이야기를 이어서 써봐요!"}
+              </p>
+              {myRecords.length > 0 && (
+                <div className="flex items-center gap-1">
+                  <button onClick={() => {
+                    const last = myRecords[0];
+                    if (last) { setText(last.content); }
+                  }} className="text-xs bg-purple-50 hover:bg-purple-100 text-purple-500 px-3 py-1 rounded-xl transition-colors flex items-center gap-1">
+                    🔄 최근 글 다시 입력
+                  </button>
+                  <button onClick={() => {
+                    const last = myRecords[0];
+                    if (last) { copyText(last.content); alert("복사되었어요! 📋"); }
+                  }} className="text-xs bg-gray-50 hover:bg-gray-100 text-gray-500 px-2 py-1 rounded-xl transition-colors flex items-center gap-1">
+                    📋 복사
+                  </button>
+                </div>
+              )}
+            </div>
+            <p className="text-xs text-gray-400 mb-2">{"더 자세히 쓸수록 AI가 더 높은 점수를 줘요! \u2B50"}</p>
+            <textarea value={text} onChange={e => setText(e.target.value)}
+              placeholder={writeMode === "diary"
+                ? "예) 오늘 수업에서 환경 문제에 대해 배웠어요. 플라스틱이 바다를 오염시킨다는 걸 알고 깜짝 놀랐어요. 앞으로는 텀블러를 꼭 써야겠다고 생각했어요."
+                : "위에서 카드를 눌러 동화 첫 부분을 가져온 뒤, 이야기를 이어서 써봐요!"}
+              className="w-full bg-gray-50 rounded-2xl p-3 text-sm text-gray-700 outline-none border border-gray-100 focus:border-purple-300 focus:bg-white transition-all"
+              style={{minHeight:"160px", resize:"vertical"}} />
+            {text && <p className="text-xs text-right text-gray-400 mt-1">{text.length}자</p>}
+          </div>
+          <button onClick={handleSave} disabled={loading || !text.trim()}
+            className="w-full bg-yellow-400 hover:bg-yellow-500 disabled:bg-gray-200 disabled:text-gray-400 text-white font-bold py-4 rounded-2xl text-base transition-colors shadow-lg disabled:shadow-none">
+            {loading ? "\uD83E\uDD16 AI가 분석 중이에요..." : "\u2B50 저장하기!"}
+          </button>
+        </div>
+      ) : (
+        <div className="px-4 pb-8 space-y-4">
+          <div className="bg-white rounded-3xl p-4 shadow-sm border border-gray-100">
+            <h3 className="font-bold text-gray-700 mb-3"> 나의 성장 여정</h3>
+            <div className="space-y-2">
+              {LEVELS.map(l => { const done = student.totalXp >= l.xp, cur = getLv(student.totalXp).lv === l.lv; return (
+                <div key={l.lv} className={`flex items-center gap-3 p-2 rounded-xl ${cur ? "bg-yellow-50 border border-yellow-200" : done ? "bg-green-50" : "bg-gray-50"}`}>
+                  <span className="text-xl">{l.icon}</span>
+                  <div className="flex-1"><div className="flex items-center gap-2"><span className="text-xs font-bold text-gray-500">Lv.{l.lv}</span><span className="text-sm font-semibold text-gray-700">{l.name}</span>{cur && <span className="text-xs bg-yellow-400 text-white px-2 py-0.5 rounded-full">현재!</span>}</div><span className="text-xs text-gray-400">{l.xp} XP부터</span></div>
+                  {done ? <span className="text-green-400"></span> : <span className="text-gray-200"></span>}
+                </div>
+              ); })}
+            </div>
+          </div>
+          <div className="bg-white rounded-3xl p-4 shadow-sm border border-gray-100">
+            <h3 className="font-bold text-gray-700 mb-3"> 나의 IB 역량 맵</h3>
+            <RadarChart data={IB_PROFILES.map(p => student.profiles[p.id] || 0)} labels={IB_PROFILES.map(p => p.label.slice(0, 3))} size={220} />
+            <div className="grid grid-cols-2 gap-2 mt-3">
+              {IB_PROFILES.map(p => (
+                <div key={p.id} className="flex items-center gap-2 text-xs">
+                  <span>{p.icon}</span><span className="text-gray-600 flex-1">{p.label}</span>
+                  <span className="font-bold" style={{ color: p.color }}>{student.profiles[p.id] || 0}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+          <div className="bg-white rounded-3xl p-4 shadow-sm border border-gray-100"><h3 className="font-bold text-gray-700 mb-3"> ATL 기술</h3><ATLBars atl={student.atl} /></div>
+          <div className="bg-white rounded-3xl p-4 shadow-sm border border-gray-100">
+            <h3 className="font-bold text-gray-700 mb-3"> 최근 기록</h3>
+            {myRecords.length === 0 ? <p className="text-sm text-gray-400 text-center py-4">아직 기록이 없어요. 첫 기록을 남겨봐요! </p> : (
+              <div className="space-y-3">{myRecords.slice(0, 5).map(r => (
+                <div key={r.id} className="bg-gray-50 rounded-2xl p-3">
+                  <div className="flex justify-between items-start mb-1">
+                    <div className="flex flex-wrap gap-1">{r.profiles.map(pid => { const p = IB_PROFILES.find(x => x.id === pid); return p ? <span key={pid} className="text-xs px-2 py-0.5 rounded-full text-white" style={{ backgroundColor: p.color }}>{p.icon} {p.label}</span> : null; })}</div>
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs text-green-500 font-bold">+{r.xp}XP</span>
+                      <button onClick={() => { copyText(r.content); alert("복사되었어요! 📋"); }}
+                        className="text-xs bg-white border border-gray-200 hover:bg-gray-100 text-gray-400 hover:text-gray-600 px-2 py-0.5 rounded-lg transition-colors">📋</button>
+                      {r.type !== "\uad50\uc0ac" && (
+                        <button onClick={async () => {
+                          if (!window.confirm("\uc774 \uae30\ub85d\uc744 \uc0ad\uc81c\ud560\uae4c\uc694?")) return;
+                          try {
+                            await sbDelete("records", r.id);
+                            if (onDeleteRecord) onDeleteRecord(r.id, r.actualXp || r.xp, r.profileScores || {});
+                          } catch(e) { alert("\uc0ad\uc81c \uc2e4\ud328: " + e.message); }
+                        }} className="text-xs text-red-300 hover:text-red-500 px-1">x</button>
+                      )}
+                    </div>
+                  </div>
+                  <p className="text-sm text-gray-700">{r.content}</p>
+                  <div className="flex justify-between mt-1"><span className="text-xs text-gray-400">{r.date}</span><span className={`text-xs ${r.type === "교사" ? "text-blue-500" : "text-purple-400"}`}>{r.type === "교사" ? "\uD83C\uDFEB 교사 부여" : "\uD83E\uDD16 AI"}</span></div>
+                  {r.comment && <p className="text-xs text-blue-600 mt-1 bg-blue-50 rounded-lg px-2 py-1"> {r.comment}</p>}
+                </div>
+              ))}</div>
+            )}
+          </div>
+        </div>
+      )}
+      <ResultPopup result={result} onClose={() => setResult(null)} />
+      {levelUp && <LevelUpPopup fromLv={levelUp.fromLv} toLv={levelUp.toLv} onClose={() => setLevelUp(null)} />}
+      <ProfileSuggestionPopup
+        profile={activeProfile}
+        writeMode={writeMode}
+        suggestion={suggestion}
+        loadingSuggestion={loadingSuggestion}
+        onClose={() => { setActiveProfile(null); setSuggestion(null); }}
+        onSendToInput={handleSendToInput}
+      />
+    </div>
+  );
+}
+
+// 
+// STUDENT GROWTH REPORT  (printable / screen view)
+// 
+function StudentReportView({ students, records, cls, onSelectStudent }) {
+  const [selId, setSelId] = useState(students[0]?.id || null);
+  const [printMode, setPrintMode] = useState(false);
+  const [reportExpanded, setReportExpanded] = useState(false);
+
+  const st = students.find(s => s.id === selId);
+  const stRecords = records.filter(r => r.studentId === selId);
+  // selId 바뀔 때 더보기 초기화
+  React.useEffect(() => { setReportExpanded(false); }, [selId]);
+  const lv = st ? getLv(st.totalXp) : LEVELS[0];
+  const next = st ? getNext(st.totalXp) : null;
+
+  // Top 3 profiles
+  const topProfiles = st
+    ? [...IB_PROFILES].sort((a, b) => (st.profiles[b.id] || 0) - (st.profiles[a.id] || 0)).slice(0, 3)
+    : [];
+
+  function handlePrint() {
+    setPrintMode(true);
+    setTimeout(() => { window.print(); setPrintMode(false); }, 300);
+  }
+
+  if (!st) return <div className="p-6 text-gray-400 text-center">학생을 선택해주세요</div>;
+
+  const ReportContent = () => (
+    <div className={`${printMode ? "p-8 bg-white text-black" : "bg-white rounded-2xl p-6 shadow-sm border border-gray-100"}`}>
+      {/* Header */}
+      <div className="flex items-start justify-between mb-6 pb-4 border-b-2 border-purple-200">
+        <div>
+          <div className="flex items-center gap-3 mb-1">
+            <span className="text-4xl">{lv.icon}</span>
+            <div>
+              <h2 className="text-2xl font-black text-gray-800">{st.name}</h2>
+              <p className="text-sm text-purple-600 font-semibold">Lv.{lv.lv} {lv.name}  {st.totalXp} XP</p>
+            </div>
+          </div>
+          <p className="text-xs text-gray-500">{cls.name}  학생 코드: {st.studentCode}</p>
+          <p className="text-xs text-gray-400">보고서 생성일: {new Date().toLocaleDateString("ko-KR")}</p>
+        </div>
+        <div className="text-right">
+          <div className="text-xs text-gray-400 mb-1">총 기록 수</div>
+          <div className="text-3xl font-bold text-purple-600">{stRecords.length}</div>
+          <div className="text-xs text-gray-400">건</div>
+        </div>
+      </div>
+
+      {/* XP Progress */}
+      <div className="mb-6">
+        <h3 className="text-sm font-bold text-gray-700 mb-2"> XP 성장 현황</h3>
+        <div className="bg-gray-50 rounded-xl p-3">
+          <div className="flex justify-between text-xs text-gray-500 mb-1">
+            <span>현재: {st.totalXp} XP (Lv.{lv.lv} {lv.name})</span>
+            <span>목표: {next ? `${next.xp} XP (Lv.${next.lv} ${next.name})` : "최고 레벨 달성! \uD83C\uDFC6"}</span>
+          </div>
+          <div className="h-4 bg-gray-200 rounded-full overflow-hidden">
+            <div className="h-full rounded-full bg-gradient-to-r from-purple-400 to-purple-600 transition-all"
+              style={{ width: `${next ? Math.round(((st.totalXp - lv.xp) / (next.xp - lv.xp)) * 100) : 100}%` }} />
+          </div>
+          {st.xpHistory && st.xpHistory.length > 1 && (
+            <div className="mt-2"><XPLineChart history={st.xpHistory} width={500} height={80} /></div>
+          )}
+        </div>
+      </div>
+
+      {/* IB Profile Radar + Top 3 */}
+      <div className="grid grid-cols-2 gap-4 mb-6">
+        <div>
+          <h3 className="text-sm font-bold text-gray-700 mb-2"> IB 학습자상 역량 맵</h3>
+          <div className="bg-gray-50 rounded-xl p-2">
+            <RadarChart data={IB_PROFILES.map(p => st.profiles[p.id] || 0)} labels={IB_PROFILES.map(p => p.label.slice(0, 3))} size={200} />
+          </div>
+        </div>
+        <div>
+          <h3 className="text-sm font-bold text-gray-700 mb-2"> 강점 학습자상 TOP 3</h3>
+          <div className="space-y-2">
+            {topProfiles.map((p, i) => (
+              <div key={p.id} className="flex items-center gap-3 bg-gray-50 rounded-xl p-3">
+                <span className="text-lg font-bold text-gray-300">{["\uD83E\uDD47","\uD83E\uDD48","\uD83E\uDD49"][i]}</span>
+                <span className="text-2xl">{p.icon}</span>
+                <div className="flex-1">
+                  <div className="text-sm font-bold text-gray-700">{p.label}</div>
+                  <div className="h-2 bg-gray-200 rounded-full mt-1">
+                    <div className="h-full rounded-full" style={{ width: `${Math.min(100, ((st.profiles[p.id] || 0) / Math.max(...IB_PROFILES.map(x => st.profiles[x.id] || 0), 1)) * 100)}%`, backgroundColor: p.color }} />
+                  </div>
+                </div>
+                <span className="text-sm font-bold" style={{ color: p.color }}>{st.profiles[p.id] || 0}점</span>
+              </div>
+            ))}
+          </div>
+
+          <h3 className="text-sm font-bold text-gray-700 mt-4 mb-2"> ATL 기술 현황</h3>
+          <div className="bg-gray-50 rounded-xl p-3">
+            <ATLBars atl={st.atl} />
+          </div>
+        </div>
+      </div>
+
+      {/* All Profile Scores */}
+      <div className="mb-6">
+        <h3 className="text-sm font-bold text-gray-700 mb-2"> 학습자상 전체 점수</h3>
+        <div className="grid grid-cols-2 gap-2">
+          {IB_PROFILES.map(p => {
+            const val = st.profiles[p.id] || 0;
+            const max = Math.max(...IB_PROFILES.map(x => st.profiles[x.id] || 0), 1);
+            return (
+              <div key={p.id} className="flex items-center gap-2 bg-gray-50 rounded-lg px-3 py-2">
+                <span>{p.icon}</span>
+                <span className="text-xs text-gray-600 flex-1">{p.label}</span>
+                <div className="w-16 h-1.5 bg-gray-200 rounded-full overflow-hidden">
+                  <div className="h-full rounded-full" style={{ width: `${(val / max) * 100}%`, backgroundColor: p.color }} />
+                </div>
+                <span className="text-xs font-bold w-8 text-right" style={{ color: p.color }}>{val}</span>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* Recent Records */}
+      <div>
+        <div className="flex items-center justify-between mb-2">
+          <h3 className="text-sm font-bold text-gray-700">📋 기록 이력 (전체 {stRecords.length}건)</h3>
+        </div>
+        {stRecords.length === 0 ? (
+          <p className="text-xs text-gray-400 text-center py-4 bg-gray-50 rounded-xl">기록이 없어요.</p>
+        ) : (
+          <>
+            <div className="space-y-2">
+              {[...stRecords].sort((a, b) => (b.date > a.date ? 1 : b.date < a.date ? -1 : 0))
+                .slice(0, reportExpanded ? undefined : 5)
+                .map(r => (
+                <div key={r.id} className="bg-gray-50 rounded-xl p-3">
+                  <div className="flex items-start justify-between gap-2 mb-1">
+                    <div className="flex flex-wrap gap-1">
+                      {r.profiles.map(pid => { const p = IB_PROFILES.find(x => x.id === pid); return p ? <span key={pid} className="text-xs px-2 py-0.5 rounded-full text-white" style={{ backgroundColor: p.color }}>{p.icon} {r.profileScores?.[pid] ? `+${r.profileScores[pid]}` : ""}</span> : null; })}
+                    </div>
+                    <div className="flex items-center gap-1 shrink-0">
+                      <span className={`text-xs ${r.type === "교사" ? "text-blue-500" : "text-purple-400"}`}>{r.type === "교사" ? "🏫" : "🤖"}</span>
+                      <span className="text-xs text-green-600 font-bold">+{r.xp}XP</span>
+                      <span className="text-xs text-gray-400">{r.date}</span>
+                    </div>
+                  </div>
+                  <p className="text-sm text-gray-700">{r.content}</p>
+                  {r.comment && <p className="text-xs text-blue-600 mt-1"> {r.comment}</p>}
+                </div>
+              ))}
+            </div>
+            {stRecords.length > 5 && !printMode && (
+              <button onClick={() => setReportExpanded(e => !e)}
+                className="w-full mt-2 py-2 text-xs font-semibold text-purple-500 hover:bg-purple-50 rounded-xl transition-colors">
+                {reportExpanded ? "▲ 접기" : `▼ 더보기 (${stRecords.length - 5}건 더)`}
+              </button>
+            )}
+          </>
+        )}
+      </div>
+
+      {/* Footer */}
+      <div className="mt-6 pt-4 border-t border-gray-200 text-center text-xs text-gray-400">
+        IB Grow  {cls.name}  {new Date().toLocaleDateString("ko-KR")} 생성
+      </div>
+    </div>
+  );
+
+  return (
+    <div className="p-6">
+      {/* Controls */}
+      <div className="flex items-center justify-between mb-5">
+        <div>
+          <h1 className="text-xl font-bold text-gray-800"> 학생 성장 리포트</h1>
+          <p className="text-xs text-gray-400 mt-0.5">개별 성장 리포트를 확인하고 인쇄할 수 있어요</p>
+        </div>
+        <div className="flex gap-2">
+          <button onClick={handlePrint}
+            className="flex items-center gap-2 bg-purple-500 hover:bg-purple-600 text-white text-sm font-bold px-4 py-2 rounded-xl transition-colors">
+             인쇄 / PDF 저장
+          </button>
+        </div>
+      </div>
+
+      {/* Student selector */}
+      <div className="bg-white rounded-2xl p-4 shadow-sm border border-gray-100 mb-4">
+        <p className="text-xs text-gray-500 mb-2 font-medium">학생 선택</p>
+        <div className="flex flex-wrap gap-2">
+          {students.map(s => (
+            <button key={s.id}
+              onClick={() => setSelId(s.id)}
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-sm transition-all ${selId === s.id ? "bg-purple-500 text-white font-bold shadow" : "bg-gray-100 text-gray-600 hover:bg-purple-100"}`}>
+              <span>{getLv(s.totalXp).icon}</span>
+              <span>{s.name}</span>
+              <span className={`text-xs ${selId === s.id ? "text-purple-200" : "text-gray-400"}`}>{s.totalXp}XP</span>
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* Report */}
+      <ReportContent />
+
+      {/* Print styles injected */}
+      <style>{`
+        @media print {
+          body > * { display: none !important; }
+          body > div > div:last-child { display: block !important; }
+          .no-print { display: none !important; }
+        }
+      `}</style>
+    </div>
+  );
+}
+
+// 
+// TEACHER APP  (FIX #11: richer dashboard)
+// 
+function TeacherApp({ teacher, classes, onLogout, onUpdateClass, onAddClass, onDeleteClass, onAddStudent, onDeleteStudent, onUpdateStudent, onGrantXP }) {
+  const [view, setView] = useState("dashboard");
+  const [activeClsId, setActiveClsId] = useState(classes[0]?.id || null);
+  const [selStudentId, setSelStudentId] = useState(null);
+  const [grantForm, setGrantForm] = useState({ profile: "inquirer", xp: 5, comment: "" });
+  const [ncName, setNcName] = useState("");
+  const [ncCode, setNcCode] = useState("");
+  const [editingStudentId, setEditingStudentId] = useState(null);
+  const [allRecordsDate, setAllRecordsDate] = useState(null); // null = 전체, "YYYY-MM-DD" = 날짜 필터
+  const [studentRecordsExpanded, setStudentRecordsExpanded] = useState(false);
+
+  const cls = classes.find(c => c.id === activeClsId) || classes[0];
+  const students = cls?.students || [];
+  const records = cls?.records || [];
+  const sorted = [...students].sort((a, b) => b.totalXp - a.totalXp);
+  const selected = students.find(s => s.id === selStudentId);
+  React.useEffect(() => { setStudentRecordsExpanded(false); }, [selStudentId]);
+
+  const avgP = Object.fromEntries(IB_PROFILES.map(p => [p.id, Math.round(students.reduce((s, st) => s + (st.profiles[p.id] || 0), 0) / Math.max(students.length, 1))]));
+  const avgA = Object.fromEntries(ATL_SKILLS.map(s => [s.id, Math.round(students.reduce((a, st) => a + (st.atl[s.id] || 0), 0) / Math.max(students.length, 1))]));
+
+  function upd(fn) { if (cls) onUpdateClass(cls.id, fn); }
+
+  function handleGrant() {
+    if (!selected) return;
+    const xp = Number(grantForm.xp);
+    const profileScores = { [grantForm.profile]: xp };
+    const rec = {
+      id: Date.now(), studentId: selected.id, date: new Date().toISOString().slice(0, 10),
+      content: `교사 직접 부여: ${IB_PROFILES.find(p => p.id === grantForm.profile)?.label}`,
+      profiles: [grantForm.profile], atl: [], xp, type: "교사", comment: grantForm.comment,
+      profileScores, atlScores: {},
+    };
+    upd(c => ({
+      ...c, records: [rec, ...c.records],
+      students: c.students.map(s => {
+        if (s.id !== selected.id) return s;
+        const newXp = s.totalXp + xp;
+        const newHist = [...(s.xpHistory || []), { date: rec.date, xp: newXp }];
+        return { ...s, totalXp: newXp, level: getLv(newXp).lv, profiles: { ...s.profiles, [grantForm.profile]: (s.profiles[grantForm.profile] || 0) + xp }, xpHistory: newHist };
+      }),
+    }));
+    setGrantForm({ profile: "inquirer", xp: 5, comment: "" });
+    alert(`\u2705 ${selected.name}에게 ${xp}XP 부여!`);
+  }
+
+  async function addStudent(name, customCode) {
+    if (!name.trim() || !cls) return;
+    const num = (students.length > 0 ? Math.max(...students.map(s => s.num || 0)) : 0) + 1;
+    const st = makeStudent(Date.now(), name.trim(), cls.code, num, "");
+    if (customCode) st.studentCode = customCode.toUpperCase();
+    upd(c => ({ ...c, students: [...c.students, st] }));
+    try { if (onAddStudent) await onAddStudent(st, cls.id); }
+    catch(e) { alert("학생 저장 실패: " + e.message); }
+  }
+
+  function createClass() {
+    if (!ncName.trim() || !ncCode.trim()) { alert("반 이름과 코드를 입력해주세요!"); return; }
+    const id = "cls_" + Date.now();
+    onAddClass({ id, teacherId: teacher.id, code: ncCode.trim().toUpperCase(), name: ncName.trim(), students: [], records: [] });
+    setNcName(""); setNcCode(""); setActiveClsId(id); setView("dashboard");
+    alert("\u2705 새 반이 만들어졌어요!");
+  }
+
+  // FIX #11: per-profile bar for class
+  const topProfiles = [...IB_PROFILES].sort((a, b) => (avgP[b.id] || 0) - (avgP[a.id] || 0)).slice(0, 5);
+
+  const navItems = [
+    { id: "dashboard", icon: "\uD83D\uDCCA", label: "대시보드" },
+    { id: "students",  icon: "\uD83D\uDC65", label: "학생 목록" },
+    { id: "report",    icon: "\uD83D\uDCC4", label: "성장 리포트" },
+    { id: "roster",    icon: "\uD83D\uDCCB", label: "학생 관리" },
+    { id: "newclass",  icon: "\u2795", label: "새 반 만들기" },
+  ];
+
+  return (
+    <div className="flex h-screen bg-gray-50 overflow-hidden">
+      <div className="w-60 bg-white border-r border-gray-100 flex flex-col shadow-sm shrink-0">
+        <div className="p-4 border-b border-gray-100 flex items-center gap-2">
+          <span className="text-2xl"></span>
+          <div><div className="font-bold text-gray-800 text-sm">IB Grow</div><div className="text-xs text-gray-400">{teacher.name}</div></div>
+        </div>
+        {classes.length > 0 && (
+          <div className="px-3 py-2 border-b border-gray-100">
+            <p className="text-xs text-gray-400 mb-1 font-medium">담당 반</p>
+            {classes.map(c => (
+              <div key={c.id} className="flex items-center gap-1 mb-0.5">
+                <button onClick={() => { setActiveClsId(c.id); setSelStudentId(null); setView("dashboard"); }}
+                  className={`flex-1 text-left px-2 py-1.5 rounded-lg text-xs transition-all ${activeClsId === c.id ? "bg-purple-100 text-purple-700 font-semibold" : "text-gray-600 hover:bg-gray-50"}`}>
+                  <span className="font-mono">{c.code}</span><span className="text-gray-400 ml-1">{c.name}</span>
+                </button>
+                <button onClick={async () => {
+                  if (!window.confirm(c.name + "\ubc18\uc744 \uc0ad\uc81c\ud560\uae4c\uc694? \ud559\uc0dd \ub370\uc774\ud130\ub3c4 \ubaa8\ub450 \uc0ad\uc81c\ub3fc\uc694.")) return;
+                  try {
+                    await sbDelete("classes", c.id);
+                    onDeleteClass(c.id);
+                    if (activeClsId === c.id) setActiveClsId(null);
+                  } catch(e) { alert("\uc0ad\uc81c \uc2e4\ud328: " + e.message); }
+                }} className="text-xs text-red-300 hover:text-red-500 px-1" title="\ubc18 \uc0ad\uc81c">x</button>
+              </div>
+            ))}
+          </div>
+        )}
+        <nav className="flex-1 p-3 space-y-1">
+          {navItems.map(item => (
+            <button key={item.id} onClick={() => { setView(item.id); setSelStudentId(null); }}
+              className={`w-full flex items-center gap-2 px-3 py-2 rounded-xl text-sm transition-all ${view === item.id ? "bg-purple-50 text-purple-700 font-semibold" : "text-gray-600 hover:bg-gray-50"}`}>
+              <span>{item.icon}</span>{item.label}
+            </button>
+          ))}
+        </nav>
+        {cls && <div className="p-3 border-t border-gray-100">
+          <div className="text-xs font-mono text-purple-500 bg-purple-50 rounded-lg px-2 py-1 mb-2 text-center">{cls.code}</div>
+          <button onClick={onLogout} className="text-xs text-gray-400 hover:text-gray-600 w-full text-center">로그아웃</button>
+        </div>}
+      </div>
+
+      <div className="flex-1 overflow-y-auto">
+        {/*  DASHBOARD  */}
+        {view === "dashboard" && cls && (
+          <div className="p-6">
+            <div className="mb-4"><h1 className="text-xl font-bold text-gray-800">{cls.name}</h1><p className="text-sm text-gray-400">{cls.code}</p></div>
+
+            {/* Stats */}
+            <div className="grid grid-cols-4 gap-3 mb-5">
+              {[
+                { l: "전체 학생", v: students.length, c: "text-purple-600", bg: "bg-purple-50" },
+                { l: "평균 XP", v: Math.round(students.reduce((s, st) => s + st.totalXp, 0) / Math.max(students.length, 1)), c: "text-green-600", bg: "bg-green-50" },
+                { l: "총 기록", v: records.length, c: "text-blue-600", bg: "bg-blue-50" },
+                { l: "이번주 기록", v: records.filter(r => { const d = new Date(r.date); const now = new Date(); return (now - d) < 7 * 86400000; }).length, c: "text-yellow-600", bg: "bg-yellow-50" },
+              ].map(s => (
+                <div key={s.l} className={`${s.bg} rounded-2xl p-3 text-center border border-white shadow-sm`}>
+                  <div className={`text-2xl font-bold ${s.c}`}>{s.v}</div>
+                  <div className="text-xs text-gray-500 mt-0.5">{s.l}</div>
+                </div>
+              ))}
+            </div>
+
+            <div className="grid grid-cols-3 gap-4 mb-4">
+              {/* Radar */}
+              <div className="col-span-1 bg-white rounded-2xl p-4 shadow-sm border border-gray-100">
+                <h3 className="font-bold text-gray-700 mb-2 text-sm"> 반 평균 역량</h3>
+                <RadarChart data={IB_PROFILES.map(p => avgP[p.id])} labels={IB_PROFILES.map(p => p.label.slice(0, 3))} size={180} />
+              </div>
+              {/* Top profiles bar */}
+              <div className="col-span-2 bg-white rounded-2xl p-4 shadow-sm border border-gray-100">
+                <h3 className="font-bold text-gray-700 mb-3 text-sm"> 학습자상 상위 순위</h3>
+                <div className="space-y-2.5">
+                  {[...IB_PROFILES].sort((a, b) => (avgP[b.id] || 0) - (avgP[a.id] || 0)).map((p, i) => {
+                    const maxVal = Math.max(...IB_PROFILES.map(x => avgP[x.id] || 0), 1);
+                    return (
+                      <div key={p.id} className="flex items-center gap-2">
+                        <span className="text-xs text-gray-400 w-4">{i + 1}</span>
+                        <span className="text-sm">{p.icon}</span>
+                        <span className="text-xs text-gray-600 w-20 shrink-0">{p.label}</span>
+                        <div className="flex-1 h-3 bg-gray-100 rounded-full overflow-hidden">
+                          <div className="h-full rounded-full transition-all" style={{ width: `${((avgP[p.id] || 0) / maxVal) * 100}%`, backgroundColor: p.color }} />
+                        </div>
+                        <span className="text-xs font-bold w-6 text-right" style={{ color: p.color }}>{avgP[p.id] || 0}</span>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            </div>
+
+            {/* ATL + XP rank side by side */}
+            <div className="grid grid-cols-2 gap-4 mb-4">
+              <div className="bg-white rounded-2xl p-4 shadow-sm border border-gray-100">
+                <h3 className="font-bold text-gray-700 mb-3 text-sm"> 반 평균 ATL</h3>
+                <ATLBars atl={avgA} />
+              </div>
+              <div className="bg-white rounded-2xl p-4 shadow-sm border border-gray-100">
+                <h3 className="font-bold text-gray-700 mb-3 text-sm"> XP 순위</h3>
+                <div className="space-y-1.5">
+                  {sorted.slice(0, 6).map((st, i) => {
+                    const lv = getLv(st.totalXp), nx = getNext(st.totalXp);
+                    const p = nx ? Math.round(((st.totalXp - lv.xp) / (nx.xp - lv.xp)) * 100) : 100;
+                    return (
+                      <div key={st.id} className="flex items-center gap-2 cursor-pointer hover:bg-gray-50 rounded-lg p-1" onClick={() => { setSelStudentId(st.id); setView("student"); }}>
+                        <span className={`text-xs font-bold w-4 ${i === 0 ? "text-yellow-500" : i === 1 ? "text-gray-400" : i === 2 ? "text-orange-400" : "text-gray-300"}`}>{i + 1}</span>
+                        <span>{lv.icon}</span>
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center gap-1 mb-0.5"><span className="text-xs font-semibold text-gray-700 truncate">{st.name}</span></div>
+                          <div className="h-1.5 bg-gray-100 rounded-full overflow-hidden"><div className="h-full bg-gradient-to-r from-purple-400 to-purple-500 rounded-full" style={{ width: `${p}%` }} /></div>
+                        </div>
+                        <span className="text-xs font-bold text-purple-600 shrink-0">{st.totalXp}</span>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            </div>
+
+            {/* FIX #11: XP growth chart per student */}
+            <div className="bg-white rounded-2xl p-4 shadow-sm border border-gray-100 mb-4">
+              <h3 className="font-bold text-gray-700 mb-3 text-sm"> 학생별 XP 성장 그래프</h3>
+              <div className="grid grid-cols-2 gap-4">
+                {sorted.slice(0, 4).map(st => (
+                  <div key={st.id} className="bg-gray-50 rounded-xl p-3">
+                    <div className="flex items-center gap-2 mb-2">
+                      <span className="text-base">{getLv(st.totalXp).icon}</span>
+                      <div><div className="text-xs font-bold text-gray-700">{st.name}</div><div className="text-xs text-purple-500">{st.totalXp} XP</div></div>
+                    </div>
+                    <XPLineChart history={st.xpHistory || []} width={240} height={80} />
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            {/* Recent records */}
+            <div className="bg-white rounded-2xl p-4 shadow-sm border border-gray-100">
+              <div className="flex items-center justify-between mb-3">
+                <h3 className="font-bold text-gray-700 text-sm">📋 최근 기록</h3>
+                <button onClick={() => { setAllRecordsDate(null); setView("allrecords"); }}
+                  className="text-xs bg-purple-50 hover:bg-purple-100 text-purple-600 font-semibold px-3 py-1 rounded-xl transition-colors">
+                  전체보기 →
+                </button>
+              </div>
+              <div className="space-y-2">
+                {[...records].sort((a, b) => (b.date > a.date ? 1 : b.date < a.date ? -1 : 0)).slice(0, 5).map(r => {
+                  const st = students.find(s => s.id === r.studentId);
+                  return (
+                    <div key={r.id} className="flex items-start gap-3 p-2 rounded-xl hover:bg-gray-50">
+                      <div className="text-base mt-0.5">{getLv(st?.totalXp || 0).icon}</div>
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-2"><span className="text-xs font-bold text-gray-700">{st?.name}</span><span className="text-xs text-green-500 font-bold">+{r.xp}XP</span><span className="text-xs text-gray-400">{r.date}</span></div>
+                        <p className="text-xs text-gray-600 truncate">{r.content}</p>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+              {records.length > 5 && (
+                <button onClick={() => { setAllRecordsDate(null); setView("allrecords"); }}
+                  className="w-full mt-3 py-2 text-xs text-gray-400 hover:text-purple-500 hover:bg-purple-50 rounded-xl transition-colors font-medium">
+                  + {records.length - 5}건 더보기
+                </button>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/*  ALL RECORDS VIEW  */}
+        {view === "allrecords" && cls && (() => {
+          const sortedRecs = [...records].sort((a, b) => (b.date > a.date ? 1 : b.date < a.date ? -1 : 0));
+          // 기록이 있는 날짜 목록
+          const datesWithRecords = [...new Set(sortedRecs.map(r => r.date))];
+          const filtered = allRecordsDate ? sortedRecs.filter(r => r.date === allRecordsDate) : sortedRecs;
+          return (
+            <div className="p-6">
+              <div className="flex items-center gap-3 mb-5">
+                <button onClick={() => setView("dashboard")} className="text-gray-400 hover:text-gray-600 text-sm flex items-center gap-1">← 대시보드</button>
+                <h1 className="text-xl font-bold text-gray-800">📋 전체 기록</h1>
+                <span className="text-sm text-gray-400">{cls.name}</span>
+              </div>
+
+              {/* 날짜 필터 */}
+              <div className="bg-white rounded-2xl p-4 shadow-sm border border-gray-100 mb-4">
+                <h3 className="text-sm font-bold text-gray-700 mb-3">📅 날짜로 찾기</h3>
+                <div className="flex flex-wrap gap-2">
+                  <button
+                    onClick={() => setAllRecordsDate(null)}
+                    className={`px-3 py-1.5 rounded-xl text-xs font-semibold transition-all ${!allRecordsDate ? "bg-purple-500 text-white shadow-sm" : "bg-gray-100 text-gray-500 hover:bg-gray-200"}`}
+                  >전체 ({records.length}건)</button>
+                  {datesWithRecords.map(d => {
+                    const cnt = sortedRecs.filter(r => r.date === d).length;
+                    return (
+                      <button key={d}
+                        onClick={() => setAllRecordsDate(allRecordsDate === d ? null : d)}
+                        className={`px-3 py-1.5 rounded-xl text-xs font-semibold transition-all ${allRecordsDate === d ? "bg-purple-500 text-white shadow-sm" : "bg-gray-100 text-gray-600 hover:bg-purple-50 hover:text-purple-600"}`}
+                      >{d} <span className={`ml-1 px-1.5 py-0.5 rounded-full text-xs ${allRecordsDate === d ? "bg-white/30 text-white" : "bg-purple-100 text-purple-500"}`}>{cnt}</span></button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* 기록 목록 */}
+              <div className="bg-white rounded-2xl p-4 shadow-sm border border-gray-100">
+                <div className="flex items-center justify-between mb-3">
+                  <h3 className="text-sm font-bold text-gray-700">
+                    {allRecordsDate ? `${allRecordsDate} 기록 (${filtered.length}건)` : `전체 기록 (${filtered.length}건)`}
+                  </h3>
+                </div>
+                {filtered.length === 0 ? (
+                  <p className="text-sm text-gray-400 text-center py-8">해당 날짜에 기록이 없어요</p>
+                ) : (
+                  <div className="space-y-3">
+                    {filtered.map(r => {
+                      const st = students.find(s => s.id === r.studentId);
+                      return (
+                        <div key={r.id} className="bg-gray-50 rounded-xl p-3 hover:bg-purple-50/30 transition-colors">
+                          <div className="flex items-center gap-2 mb-1.5">
+                            <span className="text-base">{getLv(st?.totalXp || 0).icon}</span>
+                            <span className="text-sm font-bold text-gray-700">{st?.name}</span>
+                            <span className="text-xs text-green-500 font-bold">+{r.xp}XP</span>
+                            <span className="text-xs text-gray-400 ml-auto">{r.date}</span>
+                            <span className={`text-xs ${r.type === "교사" ? "text-blue-400" : "text-purple-400"}`}>{r.type === "교사" ? "🏫 교사" : "🤖 AI"}</span>
+                          </div>
+                          <div className="flex flex-wrap gap-1 mb-1.5">
+                            {r.profiles.map(pid => { const p = IB_PROFILES.find(x => x.id === pid); return p ? <span key={pid} className="text-xs px-2 py-0.5 rounded-full text-white" style={{ backgroundColor: p.color }}>{p.icon} {p.label}</span> : null; })}
+                          </div>
+                          <p className="text-sm text-gray-700 leading-relaxed">{r.content}</p>
+                          {r.comment && <p className="text-xs text-blue-600 mt-1.5 bg-blue-50 rounded-lg px-2 py-1">💬 {r.comment}</p>}
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            </div>
+          );
+        })()}
+
+        {/*  STUDENT DETAIL  */}
+        {view === "students" && cls && (
+          <div className="p-6">
+            <h1 className="text-xl font-bold text-gray-800 mb-6"> {cls.name}</h1>
+            <div className="grid grid-cols-3 gap-4">
+              {sorted.map(st => {
+                const lv = getLv(st.totalXp);
+                return (
+                  <div key={st.id} className="bg-white rounded-2xl p-4 shadow-sm border border-gray-100 hover:shadow-md cursor-pointer transition-all" onClick={() => { setSelStudentId(st.id); setView("student"); }}>
+                    <div className="flex items-center gap-3 mb-3"><div className="w-10 h-10 rounded-full bg-gradient-to-br from-purple-100 to-green-100 flex items-center justify-center text-xl">{lv.icon}</div><div><div className="font-bold text-gray-800 text-sm">{st.name}</div><div className="text-xs text-purple-500">Lv.{lv.lv} {lv.name}</div></div></div>
+                    <div className="text-center"><div className="text-2xl font-bold text-purple-600">{st.totalXp}</div><div className="text-xs text-gray-400">XP</div></div>
+                    <div className="mt-2"><XPLineChart history={st.xpHistory || []} width={160} height={50} /></div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        {/*  STUDENT DETAIL  */}
+        {view === "student" && selected && cls && (
+          <div className="p-6">
+            <button onClick={() => setView("students")} className="text-sm text-purple-500 mb-4 hover:underline"> 목록으로</button>
+            <div className="flex items-center gap-3 mb-5">
+              <div className="w-12 h-12 rounded-full bg-gradient-to-br from-purple-100 to-green-100 flex items-center justify-center text-2xl">{getLv(selected.totalXp).icon}</div>
+              <div><h1 className="text-xl font-bold text-gray-800">{selected.name}</h1><span className="text-sm text-purple-500">Lv.{getLv(selected.totalXp).lv} {getLv(selected.totalXp).name}  {selected.totalXp} XP</span></div>
+            </div>
+
+            {/* XP Growth */}
+            <div className="bg-white rounded-2xl p-4 shadow-sm border border-gray-100 mb-4">
+              <h3 className="font-bold text-gray-700 mb-2 text-sm"> XP 성장 그래프</h3>
+              <XPLineChart history={selected.xpHistory || []} width={500} height={100} />
+            </div>
+
+            <div className="grid grid-cols-2 gap-4 mb-4">
+              <div className="bg-white rounded-2xl p-4 shadow-sm border border-gray-100"><h3 className="font-bold text-gray-700 mb-2 text-sm"> 학습자상</h3><RadarChart data={IB_PROFILES.map(p => selected.profiles[p.id] || 0)} labels={IB_PROFILES.map(p => p.label.slice(0, 3))} size={180} /></div>
+              <div className="bg-white rounded-2xl p-4 shadow-sm border border-gray-100"><h3 className="font-bold text-gray-700 mb-2 text-sm"> ATL 기술</h3><div className="mt-4"><ATLBars atl={selected.atl} /></div></div>
+            </div>
+
+            {/* Profile score details */}
+            <div className="bg-white rounded-2xl p-4 shadow-sm border border-gray-100 mb-4">
+              <h3 className="font-bold text-gray-700 mb-3 text-sm"> 학습자상 점수 상세</h3>
+              <div className="grid grid-cols-2 gap-2">
+                {IB_PROFILES.map(p => {
+                  const val = selected.profiles[p.id] || 0;
+                  const maxVal = Math.max(...IB_PROFILES.map(x => selected.profiles[x.id] || 0), 1);
+                  return (
+                    <div key={p.id} className="flex items-center gap-2 bg-gray-50 rounded-xl px-3 py-2">
+                      <span className="text-lg">{p.icon}</span>
+                      <div className="flex-1 min-w-0">
+                        <div className="text-xs text-gray-600 truncate">{p.label}</div>
+                        <div className="h-1.5 bg-gray-200 rounded-full mt-0.5"><div className="h-full rounded-full" style={{ width: `${(val / maxVal) * 100}%`, backgroundColor: p.color }} /></div>
+                      </div>
+                      <span className="text-sm font-bold shrink-0" style={{ color: p.color }}>{val}</span>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* Grant */}
+            <div className="bg-gradient-to-br from-purple-50 to-green-50 rounded-2xl p-4 border border-purple-100 mb-4">
+              <h3 className="font-bold text-gray-700 mb-3 text-sm"> 교사 포인트 직접 부여</h3>
+              <div className="grid grid-cols-3 gap-2 mb-2">
+                <select value={grantForm.profile} onChange={e => setGrantForm(f => ({ ...f, profile: e.target.value }))} className="bg-white rounded-xl border border-gray-200 px-2 py-2 text-xs">
+                  {IB_PROFILES.map(p => <option key={p.id} value={p.id}>{p.icon} {p.label}</option>)}
+                </select>
+                <input type="number" value={grantForm.xp} onChange={e => setGrantForm(f => ({ ...f, xp: e.target.value }))} min={1} max={50} className="bg-white rounded-xl border border-gray-200 px-2 py-2 text-xs" placeholder="점수" />
+                <button onClick={handleGrant} className="bg-purple-500 text-white rounded-xl px-3 py-2 text-xs font-bold hover:bg-purple-600 transition-colors">부여하기</button>
+              </div>
+              <input value={grantForm.comment} onChange={e => setGrantForm(f => ({ ...f, comment: e.target.value }))} placeholder="코멘트 (선택사항)" className="w-full bg-white rounded-xl border border-gray-200 px-3 py-2 text-xs" />
+            </div>
+
+            {/* Records */}
+            <div className="bg-white rounded-2xl p-4 shadow-sm border border-gray-100">
+              {(() => {
+                const stRecs = [...records.filter(r => r.studentId === selected.id)]
+                  .sort((a, b) => (b.date > a.date ? 1 : b.date < a.date ? -1 : 0));
+                const shown = studentRecordsExpanded ? stRecs : stRecs.slice(0, 5);
+                return (
+                  <>
+                    <h3 className="font-bold text-gray-700 mb-3 text-sm">📋 기록 이력 ({stRecs.length}건)</h3>
+                    <div className="space-y-3">
+                      {shown.map(r => (
+                        <div key={r.id} className="bg-gray-50 rounded-xl p-3">
+                          <div className="flex justify-between items-start mb-1">
+                            <div className="flex flex-wrap gap-1">{r.profiles.map(pid => { const p = IB_PROFILES.find(x => x.id === pid); return p ? <span key={pid} className="text-xs px-2 py-0.5 rounded-full text-white" style={{ backgroundColor: p.color }}>{p.icon} +{r.profileScores?.[pid] || r.xp}</span> : null; })}</div>
+                            <div className="flex gap-1 ml-2 items-center"><span className={`text-xs ${r.type === "교사" ? "text-blue-500" : "text-purple-400"}`}>{r.type === "교사" ? "🏫" : "🤖"}</span><span className="text-xs text-green-500 font-bold">+{r.xp}XP</span></div>
+                          </div>
+                          <p className="text-sm text-gray-700">{r.content}</p>
+                          {r.comment && <p className="text-xs text-blue-600 mt-1"> {r.comment}</p>}
+                          <p className="text-xs text-gray-400 mt-1">{r.date}</p>
+                        </div>
+                      ))}
+                    </div>
+                    {stRecs.length > 5 && (
+                      <button onClick={() => setStudentRecordsExpanded(e => !e)}
+                        className="w-full mt-3 py-2 text-xs font-semibold text-purple-500 hover:bg-purple-50 rounded-xl transition-colors">
+                        {studentRecordsExpanded ? "▲ 접기" : `▼ 더보기 (${stRecs.length - 5}건 더)`}
+                      </button>
+                    )}
+                  </>
+                );
+              })()}
+            </div>
+          </div>
+        )}
+
+        {/*  ROSTER  */}
+        {view === "roster" && cls && (
+          <div className="p-6">
+            <div className="mb-5"><h1 className="text-xl font-bold text-gray-800"> 학생 관리  {cls.name}</h1><p className="text-xs text-gray-400 mt-1">학생별 개인 코드비밀번호접속 URL 관리</p></div>
+
+            <div className="bg-white rounded-2xl p-4 shadow-sm border border-gray-100 mb-4">
+              <h3 className="font-bold text-gray-700 mb-3 text-sm"> 학생 추가</h3>
+              <AddStudentRow classCode={cls.code} nextNum={(students.length > 0 ? Math.max(...students.map(s => s.num || 0)) : 0) + 1} onAdd={addStudent} />
+            </div>
+
+            <div className="bg-white rounded-2xl shadow-sm border border-gray-100 overflow-hidden mb-4">
+              <div className="grid grid-cols-12 gap-2 px-4 py-2 bg-gray-50 border-b border-gray-100 text-xs font-semibold text-gray-500">
+                <div className="col-span-2">이름 / XP</div>
+                <div className="col-span-2">학생 코드</div>
+                <div className="col-span-2">비밀번호</div>
+                <div className="col-span-4">개별 접속 URL</div>
+                <div className="col-span-2 text-center">관리</div>
+              </div>
+              {students.length === 0 && <p className="text-sm text-gray-400 text-center py-8">학생을 추가해주세요</p>}
+              {students.map(st => (
+                <div key={st.id} className="grid grid-cols-12 gap-2 px-4 py-2.5 border-b border-gray-50 hover:bg-gray-50 items-center">
+                  <div className="col-span-2">
+                    <div className="flex items-center gap-1.5"><span>{getLv(st.totalXp).icon}</span><span className="text-sm font-semibold text-gray-700">{st.name}</span></div>
+                    <div className="text-xs text-purple-400 ml-5">{st.totalXp} XP</div>
+                  </div>
+                  <div className="col-span-2">
+                    {editingStudentId === st.id ? (
+                      <input defaultValue={st.studentCode} onBlur={e => {
+                        const newCode = e.target.value.toUpperCase();
+                        upd(c => ({ ...c, students: c.students.map(s => s.id === st.id ? { ...s, studentCode: newCode } : s) }));
+                        if(onUpdateStudent) { const updated = students.find(s=>s.id===st.id); if(updated) onUpdateStudent({...updated, studentCode: newCode}, cls.id).catch(e=>console.error(e)); }
+                        setEditingStudentId(null);
+                      }}
+                        className="w-full border border-purple-300 rounded-lg px-2 py-1 text-xs font-mono" autoFocus />
+                    ) : (
+                      <div className="flex items-center gap-1">
+                        <span className="text-xs font-mono text-purple-700 bg-purple-50 px-2 py-0.5 rounded">{st.studentCode}</span>
+                        <button onClick={() => setEditingStudentId(st.id)} className="text-gray-400 hover:text-gray-600 text-xs"></button>
+                      </div>
+                    )}
+                  </div>
+                  <div className="col-span-2">
+                    <input value={st.password || ""} onChange={e => {
+                      const pw = e.target.value;
+                      upd(c => ({ ...c, students: c.students.map(s => s.id === st.id ? { ...s, password: pw } : s) }));
+                      if(onUpdateStudent) { const updated = students.find(s=>s.id===st.id); if(updated) onUpdateStudent({...updated, password: pw}, cls.id).catch(e=>console.error(e)); }
+                    }}
+                      placeholder="없음" className="w-full border border-gray-200 rounded-lg px-2 py-1 text-xs" />
+                    {st.password && <span className="text-xs text-green-500"> 설정됨</span>}
+                  </div>
+                  {/* FIX #3: Use CopyButton */}
+                  <div className="col-span-4">
+                    <div className="flex items-center gap-1">
+                      <span className="text-xs text-blue-600 truncate font-mono bg-blue-50 px-2 py-0.5 rounded flex-1 overflow-hidden">{makeStudentUrl(st.studentCode)}</span>
+                      <CopyButton text={makeStudentUrl(st.studentCode)} label="복사" />
+                    </div>
+                  </div>
+                  <div className="col-span-2 flex items-center justify-center gap-2">
+                    <button onClick={() => { setSelStudentId(st.id); setView("student"); }} className="text-xs text-purple-500 hover:text-purple-700">상세</button>
+                    <button onClick={() => { if (window.confirm(`${st.name}을 삭제할까요?`)) { upd(c => ({ ...c, students: c.students.filter(s => s.id !== st.id) })); if(onDeleteStudent) onDeleteStudent(st.id).catch(e => console.error(e)); }; }} className="text-xs text-red-400 hover:text-red-600">삭제</button>
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            {students.length > 0 && (
+              <div className="bg-blue-50 rounded-2xl p-4 border border-blue-100">
+                <h3 className="font-bold text-blue-700 mb-2 text-sm"> 전체 접속 정보 복사</h3>
+                <CopyButton
+                  text={students.map(s => `${s.name}\t코드: ${s.studentCode}\tURL: ${makeStudentUrl(s.studentCode)}${s.password ? `\t비밀번호: ${s.password}` : ""}`).join("\n")}
+                  label="\uD83D\uDCCB 전체 접속 정보 복사"
+                  className="!text-sm !px-4 !py-2 !rounded-xl"
+                />
+              </div>
+            )}
+          </div>
+        )}
+
+        {/*  GROWTH REPORT  */}
+        {view === "report" && cls && (
+          <StudentReportView
+            students={sorted}
+            records={records}
+            cls={cls}
+            onSelectStudent={id => { setSelStudentId(id); setView("student"); }}
+          />
+        )}
+
+        {/*  NEW CLASS  */}
+        {view === "newclass" && (
+          <div className="p-6 max-w-lg">
+            <h1 className="text-xl font-bold text-gray-800 mb-1"> 새 반 만들기</h1>
+            <p className="text-sm text-gray-400 mb-6">새 반을 개설하면 학생들이 반 코드로 접속해요.</p>
+            <div className="bg-white rounded-2xl p-5 shadow-sm border border-gray-100 space-y-4">
+              <div><label className="text-sm font-semibold text-gray-700 block mb-1">반 이름</label>
+                <input value={ncName} onChange={e => setNcName(e.target.value)} placeholder="예: 매안초 3학년 5반" className="w-full border-2 border-gray-200 focus:border-purple-400 rounded-xl px-3 py-2.5 text-sm outline-none" /></div>
+              <div><label className="text-sm font-semibold text-gray-700 block mb-1">반 코드</label>
+                <input value={ncCode} onChange={e => setNcCode(e.target.value.toUpperCase())} placeholder="예: MAEAN3-5" className="w-full border-2 border-gray-200 focus:border-purple-400 rounded-xl px-3 py-2.5 text-sm font-mono outline-none" />
+                <p className="text-xs text-gray-400 mt-1">학생 코드: {ncCode || "반코드"}-01, -02  자동 생성</p></div>
+              <button onClick={createClass} className="w-full bg-purple-500 hover:bg-purple-600 text-white font-bold py-3 rounded-xl transition-colors"> 반 만들기</button>
+            </div>
+          </div>
+        )}
+
+      </div>
+    </div>
+  );
+}
+
+function AddStudentRow({ classCode, nextNum, onAdd }) {
+  const [name, setName] = useState("");
+  const [code, setCode] = useState("");
+  const autoCode = makeStudentCode(classCode, nextNum);
+  const finalCode = code.trim() || autoCode;
+  function submit() {
+    if (name.trim()) { onAdd(name.trim(), finalCode.toUpperCase()); setName(""); setCode(""); }
+  }
+  return (
+    <div className="space-y-2">
+      <div className="flex gap-2 items-center">
+        <input value={name} onChange={e => setName(e.target.value)} onKeyDown={e => e.key === "Enter" && submit()} placeholder="학생 이름" className="flex-1 border border-gray-200 rounded-xl px-3 py-2 text-sm outline-none" />
+        <button onClick={submit} className="bg-green-500 text-white rounded-xl px-4 py-2 text-sm font-bold hover:bg-green-600 transition-colors">추가</button>
+      </div>
+      <div className="flex items-center gap-2">
+        <span className="text-xs text-gray-400 whitespace-nowrap">학생 코드:</span>
+        <input value={code} onChange={e => setCode(e.target.value.toUpperCase())} placeholder={autoCode} className="flex-1 border border-gray-200 rounded-xl px-3 py-1.5 text-xs font-mono outline-none" />
+        <span className="text-xs text-gray-400">{"(비우면 " + autoCode + " 자동 생성)"}</span>
+      </div>
+    </div>
+  );
+}
+
+// 
+// MASTER APP  (FIX #1: editable teacher code)
+// 
+function MasterApp({ teachers, classes, onLogout, onAddTeacher, onRemoveTeacher, onUpdateTeacher }) {
+  const [view, setView] = useState("overview");
+  const [ntName, setNtName] = useState("");
+  const [ntEmail, setNtEmail] = useState("");
+  const [ntCode, setNtCode] = useState("TEACH-" + uid());
+  const [editingTeacherId, setEditingTeacherId] = useState(null);
+  const [editForm, setEditForm] = useState({});
+  const [apiKeyInput, setApiKeyInput] = useState(GEMINI_API_KEY);
+  const [apiSaved, setApiSaved] = useState(false);
+
+  async function handleSaveApiKey() {
+    if (!apiKeyInput.trim()) { alert("키를 입력해주세요!"); return; }
+    try {
+      await saveApiKey(apiKeyInput.trim());
+      setApiSaved(true); setTimeout(() => setApiSaved(false), 2000);
+    } catch(e) { alert("저장 실패: " + e.message); }
+  }
+  async function handleResetApiKey() {
+    try {
+      await saveApiKey(DEFAULT_GEMINI_KEY);
+      setApiKeyInput(DEFAULT_GEMINI_KEY);
+      setApiSaved(true); setTimeout(() => setApiSaved(false), 2000);
+    } catch(e) { alert("초기화 실패: " + e.message); }
+  }
+
+  function addTeacher() {
+    if (!ntName.trim()) { alert("이름을 입력해주세요!"); return; }
+    if (!ntCode.trim()) { alert("교사 코드를 입력해주세요!"); return; }
+    onAddTeacher({ id: "t_" + Date.now(), name: ntName.trim(), teacherCode: ntCode.trim().toUpperCase(), teacherPassword: "", email: ntEmail.trim(), classIds: [] });
+    setNtName(""); setNtEmail(""); setNtCode("TEACH-" + uid());
+    alert("\u2705 교사 등록 완료!");
+  }
+
+  function startEdit(t) { setEditingTeacherId(t.id); setEditForm({ name: t.name, teacherCode: t.teacherCode, email: t.email || "", teacherPassword: t.teacherPassword || "" }); }
+  function saveEdit(id) { onUpdateTeacher(id, t => ({ ...t, ...editForm, teacherCode: editForm.teacherCode.toUpperCase() })); setEditingTeacherId(null); }
+
+  const totalStudents = classes.reduce((s, c) => s + c.students.length, 0);
+  const totalRecords  = classes.reduce((s, c) => s + c.records.length, 0);
+
+  return (
+    <div className="flex h-screen bg-gray-900 overflow-hidden">
+      <div className="w-56 bg-gray-800 flex flex-col shadow-xl shrink-0">
+        <div className="p-4 border-b border-gray-700 flex items-center gap-2">
+          <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-yellow-400 to-orange-500 flex items-center justify-center text-sm font-bold text-white">M</div>
+          <div><div className="font-bold text-white text-sm">IB Grow</div><div className="text-xs text-yellow-400">마스터 관리자</div></div>
+        </div>
+        <nav className="flex-1 p-3 space-y-1">
+          {[{ id: "overview", icon: "\uD83D\uDCCA", label: "전체 현황" }, { id: "teachers", icon: "\uD83D\uDC69\u200D\uD83C\uDFEB", label: "교사 관리" }, { id: "classes", icon: "\uD83C\uDFEB", label: "반 현황" }, { id: "apikey", icon: "\u2699\uFE0F", label: "API 설정" }].map(item => (
+            <button key={item.id} onClick={() => setView(item.id)} className={`w-full flex items-center gap-2 px-3 py-2 rounded-xl text-sm transition-all ${view === item.id ? "bg-yellow-500 text-white font-semibold" : "text-gray-400 hover:bg-gray-700 hover:text-white"}`}>
+              <span>{item.icon}</span>{item.label}
+            </button>
+          ))}
+        </nav>
+        <div className="p-3 border-t border-gray-700"><button onClick={onLogout} className="text-xs text-gray-500 hover:text-gray-300 w-full text-center">로그아웃</button></div>
+      </div>
+
+      <div className="flex-1 overflow-y-auto bg-gray-50">
+        {view === "overview" && (
+          <div className="p-6">
+            <div className="mb-6 flex items-center gap-3">
+              <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-yellow-400 to-orange-500 flex items-center justify-center text-xl font-bold text-white">M</div>
+              <div><h1 className="text-xl font-bold text-gray-800">전체 현황</h1><p className="text-sm text-gray-400">IB Grow 플랫폼 운영 현황</p></div>
+            </div>
+            <div className="grid grid-cols-4 gap-4 mb-6">
+              {[{ l: "교사 수", v: teachers.length, c: "text-purple-600", bg: "bg-purple-50" }, { l: "반 수", v: classes.length, c: "text-blue-600", bg: "bg-blue-50" }, { l: "전체 학생", v: totalStudents, c: "text-green-600", bg: "bg-green-50" }, { l: "전체 기록", v: totalRecords, c: "text-yellow-600", bg: "bg-yellow-50" }].map(s => (
+                <div key={s.l} className={`${s.bg} rounded-2xl p-4 border border-white shadow-sm text-center`}><div className={`text-3xl font-bold ${s.c}`}>{s.v}</div><div className="text-xs text-gray-500 mt-1">{s.l}</div></div>
+              ))}
+            </div>
+            <div className="bg-white rounded-2xl p-4 shadow-sm border border-gray-100">
+              <h3 className="font-bold text-gray-700 mb-3"> 전체 반 목록</h3>
+              <div className="space-y-2">{classes.map(c => {
+                const t = teachers.find(x => x.id === c.teacherId);
+                const avgXp = Math.round(c.students.reduce((s, st) => s + st.totalXp, 0) / Math.max(c.students.length, 1));
+                return (
+                  <div key={c.id} className="flex items-center gap-3 p-3 rounded-xl bg-gray-50">
+                    <div className="flex-1"><div className="flex items-center gap-2"><span className="font-mono text-sm font-bold text-purple-600">{c.code}</span><span className="text-sm text-gray-700">{c.name}</span></div><span className="text-xs text-gray-400">담임: {t?.name || "미지정"}</span></div>
+                    <div className="text-right"><div className="text-sm font-bold text-gray-700">{c.students.length}명</div><div className="text-xs text-gray-400">평균 {avgXp} XP</div></div>
+                  </div>
+                );
+              })}</div>
+            </div>
+          </div>
+        )}
+
+        {view === "teachers" && (
+          <div className="p-6">
+            <h1 className="text-xl font-bold text-gray-800 mb-6"> 교사 관리</h1>
+
+            {/* Add teacher - FIX #1: editable code field */}
+            <div className="bg-white rounded-2xl p-5 shadow-sm border border-gray-100 mb-6">
+              <h3 className="font-bold text-gray-700 mb-3 text-sm"> 교사 등록</h3>
+              <div className="grid grid-cols-2 gap-3 mb-3">
+                <input value={ntName} onChange={e => setNtName(e.target.value)} placeholder="교사 이름 *" className="border border-gray-200 rounded-xl px-3 py-2 text-sm outline-none" />
+                <input value={ntEmail} onChange={e => setNtEmail(e.target.value)} placeholder="이메일 (선택)" className="border border-gray-200 rounded-xl px-3 py-2 text-sm outline-none" />
+              </div>
+              <div className="flex gap-2 mb-3">
+                <div className="flex-1">
+                  <label className="text-xs text-gray-500 mb-1 block">교사 코드 (직접 수정 가능)</label>
+                  <input value={ntCode} onChange={e => setNtCode(e.target.value.toUpperCase())} placeholder="TEACH-XXXX" className="w-full border-2 border-purple-200 focus:border-purple-400 rounded-xl px-3 py-2 text-sm font-mono outline-none" />
+                </div>
+                <div className="flex items-end">
+                  <button onClick={() => setNtCode("TEACH-" + uid())} className="px-3 py-2 bg-gray-100 hover:bg-gray-200 rounded-xl text-xs text-gray-600 transition-colors"> 랜덤</button>
+                </div>
+              </div>
+              <button onClick={addTeacher} className="bg-purple-500 text-white rounded-xl px-5 py-2 text-sm font-bold hover:bg-purple-600 transition-colors">등록하기</button>
+            </div>
+
+            {/* Teacher list */}
+            <div className="space-y-3">
+              {teachers.map(t => {
+                const tClasses = classes.filter(c => c.teacherId === t.id);
+                const isEditing = editingTeacherId === t.id;
+                return (
+                  <div key={t.id} className="bg-white rounded-2xl p-4 shadow-sm border border-gray-100">
+                    {isEditing ? (
+                      <div className="space-y-2">
+                        <div className="grid grid-cols-2 gap-2">
+                          <input value={editForm.name} onChange={e => setEditForm(f => ({ ...f, name: e.target.value }))} placeholder="이름" className="border border-gray-200 rounded-lg px-2 py-1.5 text-sm" />
+                          <input value={editForm.email} onChange={e => setEditForm(f => ({ ...f, email: e.target.value }))} placeholder="이메일" className="border border-gray-200 rounded-lg px-2 py-1.5 text-sm" />
+                        </div>
+                        <div className="grid grid-cols-2 gap-2">
+                          {/* FIX #1: Editable teacher code */}
+                          <div>
+                            <label className="text-xs text-gray-500">교사 코드</label>
+                            <input value={editForm.teacherCode} onChange={e => setEditForm(f => ({ ...f, teacherCode: e.target.value.toUpperCase() }))} className="w-full border border-purple-300 rounded-lg px-2 py-1.5 text-sm font-mono mt-0.5" />
+                          </div>
+                          {/* FIX #2: Teacher password */}
+                          <div>
+                            <label className="text-xs text-gray-500">교사 비밀번호 (선택)</label>
+                            <input value={editForm.teacherPassword} onChange={e => setEditForm(f => ({ ...f, teacherPassword: e.target.value }))} placeholder="없으면 비워두세요" className="w-full border border-gray-200 rounded-lg px-2 py-1.5 text-sm mt-0.5" />
+                          </div>
+                        </div>
+                        <div className="flex gap-2">
+                          <button onClick={() => saveEdit(t.id)} className="bg-purple-500 text-white rounded-lg px-4 py-1.5 text-xs font-bold">저장</button>
+                          <button onClick={() => setEditingTeacherId(null)} className="bg-gray-100 text-gray-600 rounded-lg px-4 py-1.5 text-xs">취소</button>
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="flex items-start justify-between">
+                        <div className="flex items-center gap-3">
+                          <div className="w-10 h-10 rounded-full bg-gradient-to-br from-purple-100 to-orange-100 flex items-center justify-center text-xl"></div>
+                          <div>
+                            <div className="font-bold text-gray-800">{t.name}</div>
+                            {t.email && <div className="text-xs text-gray-400">{t.email}</div>}
+                            <div className="flex items-center gap-2 mt-1">
+                              <span className="text-xs font-mono bg-yellow-100 text-yellow-700 px-2 py-0.5 rounded"> {t.teacherCode}</span>
+                              {/* FIX #3: CopyButton */}
+                              <CopyButton text={t.teacherCode} label="복사" />
+                              {t.teacherPassword && <span className="text-xs bg-green-100 text-green-600 px-2 py-0.5 rounded"> 비밀번호 설정됨</span>}
+                            </div>
+                          </div>
+                        </div>
+                        <div className="flex gap-2">
+                          <button onClick={() => startEdit(t)} className="text-xs text-purple-500 hover:text-purple-700 px-3 py-1 border border-purple-200 rounded-lg hover:bg-purple-50">수정</button>
+                          <button onClick={() => { if (window.confirm(`${t.name} 교사를 삭제할까요?`)) onRemoveTeacher(t.id); }} className="text-xs text-red-400 hover:text-red-600 px-3 py-1 border border-red-200 rounded-lg hover:bg-red-50">삭제</button>
+                        </div>
+                      </div>
+                    )}
+                    {!isEditing && (
+                      <div className="mt-3 pt-3 border-t border-gray-100">
+                        <p className="text-xs text-gray-500 mb-1">담당 반 ({tClasses.length}개)</p>
+                        {tClasses.length === 0 ? <p className="text-xs text-gray-400">담당 반 없음</p> : (
+                          <div className="flex flex-wrap gap-2">{tClasses.map(c => <span key={c.id} className="text-xs font-mono bg-purple-50 text-purple-600 px-2 py-0.5 rounded">{c.code}</span>)}</div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+              {teachers.length === 0 && <div className="bg-white rounded-2xl p-8 text-center text-gray-400 shadow-sm border border-gray-100">등록된 교사가 없어요.</div>}
+            </div>
+          </div>
+        )}
+
+        {view === "classes" && (
+          <div className="p-6">
+            <h1 className="text-xl font-bold text-gray-800 mb-6"> 반 현황</h1>
+            <div className="space-y-4">{classes.map(c => {
+              const t = teachers.find(x => x.id === c.teacherId);
+              return (
+                <div key={c.id} className="bg-white rounded-2xl p-4 shadow-sm border border-gray-100">
+                  <div className="flex items-center justify-between mb-3">
+                    <div><div className="flex items-center gap-2"><span className="font-mono font-bold text-purple-600 text-lg">{c.code}</span><span className="font-bold text-gray-800">{c.name}</span></div><span className="text-xs text-gray-400">담임: {t?.name || "미지정"}  학생 {c.students.length}명  기록 {c.records.length}건</span></div>
+                  </div>
+                  <div className="grid grid-cols-5 gap-2">
+                    {c.students.slice(0, 10).map(s => (
+                      <div key={s.id} className="flex items-center gap-1 text-xs bg-gray-50 rounded-lg px-2 py-1">
+                        <span>{getLv(s.totalXp).icon}</span><span className="text-gray-700 truncate">{s.name}</span><span className="text-purple-400 shrink-0">{s.totalXp}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              );
+            })}
+            {classes.length === 0 && <div className="bg-white rounded-2xl p-8 text-center text-gray-400 shadow-sm border border-gray-100">아직 개설된 반이 없어요.</div>}
+            </div>
+          </div>
+        )}
+
+        {view === "apikey" && (
+          <div className="p-6 max-w-lg">
+            <h1 className="text-xl font-bold text-gray-800 mb-2">API \ucf54\ub4dc \uc124\uc815</h1>
+            <p className="text-sm text-gray-400 mb-5">Gemini AI API \ud0a4\uac00 \ud55c\ub3c4 \ucd08\uacfc\ub418\uba74 \uc5ec\uae30\uc11c \uad50\uccb4\ud558\uc138\uc694. \ubaa8\ub4e0 \uae30\uae30\uc5d0 \uc989\uc2dc \uc801\uc6a9\ub3fc\uc694.</p>
+            <div className="bg-white rounded-2xl p-5 shadow-sm border border-gray-100 mb-4">
+              <h3 className="font-bold text-gray-700 mb-3 text-sm">Gemini API \ud0a4</h3>
+              <p className="text-xs text-gray-400 mb-3">\ubb34\ub8cc \ud55c\ub3c4 \ucd08\uacfc \uc2dc <a href="https://aistudio.google.com/app/apikey" target="_blank" className="text-blue-500 underline">Google AI Studio</a>\uc5d0\uc11c \uc0c8 \ud0a4\ub97c \ubc1c\uae09\ubc1b\uc73c\uc138\uc694.</p>
+              <input value={apiKeyInput} onChange={e=>setApiKeyInput(e.target.value)} placeholder="AIza..." className="w-full border-2 border-gray-200 focus:border-yellow-400 rounded-xl px-3 py-2.5 text-sm font-mono outline-none mb-3" />
+              <div className="flex gap-2">
+                <button onClick={handleSaveApiKey} className={"flex-1 font-bold py-2.5 rounded-xl text-sm "+(apiSaved?"bg-green-500 text-white":"bg-yellow-400 hover:bg-yellow-500 text-white")}>
+                  {apiSaved?"\u2705 \uc800\uc7a5\ub428!":"\uc800\uc7a5\ud558\uae30"}
+                </button>
+                <button onClick={handleResetApiKey} className="px-4 py-2.5 rounded-xl bg-gray-100 hover:bg-gray-200 text-sm text-gray-600">\uae30\ubcf8\uac12\uc73c\ub85c</button>
+              </div>
+            </div>
+            <div className="bg-yellow-50 rounded-2xl p-4 border border-yellow-100">
+              <h3 className="font-bold text-yellow-700 mb-2 text-sm">API \ud0a4 \ubc1c\uae09 \ubc29\ubc95</h3>
+              <ol className="text-xs text-yellow-700 space-y-1 list-decimal list-inside">
+                <li><a href="https://aistudio.google.com/app/apikey" target="_blank" className="underline">aistudio.google.com</a> \uc811\uc18d</li>
+                <li>Google \uacc4\uc815\uc73c\ub85c \ub85c\uadf8\uc778</li>
+                <li>Create API Key \ubc84\ud2bc \ud074\ub9ad</li>
+                <li>\uc0dd\uc131\ub41c \ud0a4\ub97c \uc785\ub825\ub780\uc5d0 \ubd99\uc5ec\ub123\uae30</li>
+                <li>\uc800\uc7a5 \ud074\ub9ad - \ubaa8\ub4e0 \uae30\uae30 \uc989\uc2dc \uc801\uc6a9</li>
+              </ol>
+            </div>
+          </div>
+        )}
+        )}
+      </div>
+    </div>
+  );
+}
+
+// 
+// LOGIN
+// 
+function LoginScreen({ teachers, classes, onStudentLogin, onTeacherLogin, onMasterLogin }) {
+  const [step, setStep] = useState("role");
+  const [studentCode, setStudentCode] = useState("");
+  const [studentPw, setStudentPw] = useState("");
+  const [teacherCode, setTeacherCode] = useState("");
+  const [teacherPw, setTeacherPw] = useState("");    // FIX #2
+  const [masterId, setMasterId] = useState("");
+  const [masterPw, setMasterPw] = useState("");
+  const [foundStudent, setFoundStudent] = useState(null);
+  const [foundTeacher, setFoundTeacher] = useState(null);
+  const [error, setError] = useState("");
+
+  // URL auto-login - classes 로드 완료 후 실행
+  useEffect(() => {
+    if (!classes || classes.length === 0) return;
+    const sc = new URLSearchParams(window.location.search).get("student");
+    if (sc) lookupStudentByCode(sc);
+  }, [classes]);
+
+  function lookupStudentByCode(code) {
+    const upper = code.trim().toUpperCase();
+    for (const cls of classes) {
+      const st = cls.students.find(s => (s.studentCode||"").trim().toUpperCase() === upper);
+      if (st) {
+        setFoundStudent({ student: st, classData: cls });
+        if (st.password) { setStep("student-pw"); setError(""); }
+        else { onStudentLogin(st, cls); }
+        return;
+      }
+    }
+    setError("코드를 찾을 수 없어요. 선생님께 확인해봐요!");
+  }
+
+  function lookupStudent(code) {
+    const upper = (code || studentCode).trim().toUpperCase();
+    for (const cls of classes) {
+      const st = cls.students.find(s => (s.studentCode||"").trim().toUpperCase() === upper);
+      if (st) {
+        setFoundStudent({ student: st, classData: cls });
+        if (st.password) { setStep("student-pw"); setError(""); }
+        else { onStudentLogin(st, cls); }
+        return;
+      }
+    }
+    setError("코드를 찾을 수 없어요. 선생님께 확인해봐요!");
+  }
+
+  function handleStudentPw() {
+    if (!foundStudent) return;
+    if (foundStudent.student.password === studentPw) onStudentLogin(foundStudent.student, foundStudent.classData);
+    else setError("비밀번호가 틀렸어요!");
+  }
+
+  // FIX #2: teacher login with optional password
+  function handleTeacherCode() {
+    const t = teachers.find(x => x.teacherCode === teacherCode.trim().toUpperCase());
+    if (!t) { setError("교사 코드를 다시 확인해주세요!"); return; }
+    if (t.teacherPassword) { setFoundTeacher(t); setStep("teacher-pw"); setError(""); }
+    else { onTeacherLogin(t); }
+  }
+  function handleTeacherPw() {
+    if (!foundTeacher) return;
+    if (foundTeacher.teacherPassword === teacherPw) onTeacherLogin(foundTeacher);
+    else setError("비밀번호가 틀렸어요!");
+  }
+
+  function handleMasterLogin() {
+    if (masterId === MASTER_ID && masterPw === MASTER_PW) onMasterLogin();
+    else setError("아이디 또는 비밀번호가 틀렸어요!");
+  }
+
+  return (
+    <div className="min-h-screen bg-gradient-to-b from-purple-100 via-green-50 to-yellow-50 flex items-center justify-center p-4">
+      <div className="w-full max-w-sm">
+        <div className="text-center mb-8"><div className="text-6xl mb-3">{"\uD83C\uDF31"}</div><h1 className="text-2xl font-black text-gray-800">IB Grow</h1><p className="text-sm text-gray-500">나의 IB 역량 성장 여정을 시작해봐요!</p></div>
+
+        {step === "role" && (
+          <div className="space-y-3">
+            <button onClick={() => { setStep("student-code"); setError(""); }} className="w-full bg-white border-2 border-purple-200 hover:border-purple-400 rounded-3xl p-5 text-left transition-all shadow-sm hover:shadow-md">
+              <div className="text-3xl mb-2">{"\uD83D\uDC66"}</div><div className="font-bold text-gray-800">학생으로 시작하기</div><div className="text-xs text-gray-400 mt-1">나만의 개인 코드로 로그인해요</div>
+            </button>
+            <button onClick={() => { setStep("teacher"); setError(""); }} className="w-full bg-white border-2 border-orange-200 hover:border-orange-400 rounded-3xl p-5 text-left transition-all shadow-sm hover:shadow-md">
+              <div className="text-3xl mb-2">{"\uD83D\uDC69\u200D\uD83C\uDFEB"}</div><div className="font-bold text-gray-800">선생님으로 시작하기</div><div className="text-xs text-gray-400 mt-1">교사 코드로 로그인해요</div>
+            </button>
+            <button onClick={() => { setStep("master"); setError(""); }} className="w-full bg-white border-2 border-gray-200 hover:border-gray-400 rounded-3xl p-4 text-left transition-all shadow-sm hover:shadow-md">
+              <div className="flex items-center gap-2"><span className="text-lg">{"\uD83D\uDD10"}</span><div><div className="font-semibold text-gray-600 text-sm">관리자 로그인</div><div className="text-xs text-gray-400">마스터 계정</div></div></div>
+            </button>
+          </div>
+        )}
+
+        {step === "student-code" && (
+          <div className="bg-white rounded-3xl p-6 shadow-md">
+            <h2 className="font-bold text-gray-800 mb-1"> 나만의 코드를 입력해요</h2>
+            <p className="text-xs text-gray-400 mb-4">선생님께 받은 개인 코드 (예: MAEAN3-5-01)</p>
+            <input value={studentCode} onChange={e => setStudentCode(e.target.value.toUpperCase())} onKeyDown={e => e.key === "Enter" && lookupStudent()}
+              placeholder="예: MAEAN3-5-01" className="w-full border-2 border-gray-200 focus:border-purple-400 rounded-2xl px-4 py-3 text-lg font-mono outline-none mb-3" />
+            {error && <p className="text-sm text-red-500 mb-3">{error}</p>}
+            <button onClick={() => lookupStudent()} className="w-full bg-purple-500 text-white font-bold py-3 rounded-2xl hover:bg-purple-600 transition-colors">로그인 </button>
+            <button onClick={() => { setStep("role"); setError(""); }} className="w-full mt-2 text-sm text-gray-400 hover:text-gray-600"> 뒤로</button>
+          </div>
+        )}
+
+        {step === "student-pw" && foundStudent && (
+          <div className="bg-white rounded-3xl p-6 shadow-md">
+            <h2 className="font-bold text-gray-800 mb-1"> 비밀번호를 입력해요</h2>
+            <p className="text-xs text-gray-400 mb-1">안녕하세요, <b className="text-purple-600">{foundStudent.student.name}</b>!</p>
+            <p className="text-xs text-gray-400 mb-4">{foundStudent.classData.name}</p>
+            <input type="password" value={studentPw} onChange={e => setStudentPw(e.target.value)} onKeyDown={e => e.key === "Enter" && handleStudentPw()}
+              placeholder="비밀번호" className="w-full border-2 border-gray-200 focus:border-purple-400 rounded-2xl px-4 py-3 text-lg outline-none mb-3" />
+            {error && <p className="text-sm text-red-500 mb-3">{error}</p>}
+            <button onClick={handleStudentPw} className="w-full bg-purple-500 text-white font-bold py-3 rounded-2xl hover:bg-purple-600 transition-colors">입장하기 </button>
+            <button onClick={() => { setStep("student-code"); setStudentPw(""); setError(""); }} className="w-full mt-2 text-sm text-gray-400 hover:text-gray-600"> 뒤로</button>
+          </div>
+        )}
+
+        {step === "teacher" && (
+          <div className="bg-white rounded-3xl p-6 shadow-md">
+            <h2 className="font-bold text-gray-800 mb-1"> 교사 코드 입력</h2>
+            <p className="text-xs text-gray-400 mb-4">관리자로부터 발급받은 교사 코드를 입력하세요</p>
+            <input value={teacherCode} onChange={e => setTeacherCode(e.target.value.toUpperCase())} onKeyDown={e => e.key === "Enter" && handleTeacherCode()}
+              placeholder="예: TEACH-T1" className="w-full border-2 border-gray-200 focus:border-orange-400 rounded-2xl px-4 py-3 text-base font-mono outline-none mb-3" />
+            {error && <p className="text-sm text-red-500 mb-3">{error}</p>}
+            <button onClick={handleTeacherCode} className="w-full bg-orange-400 text-white font-bold py-3 rounded-2xl hover:bg-orange-500 transition-colors">다음 </button>
+            <button onClick={() => { setStep("role"); setError(""); }} className="w-full mt-2 text-sm text-gray-400 hover:text-gray-600"> 뒤로</button>
+            <div className="mt-3 p-3 bg-orange-50 rounded-xl"><p className="text-xs text-orange-600"> 데모 교사 코드: <b className="font-mono">TEACH-T1</b></p></div>
+          </div>
+        )}
+
+        {/* FIX #2: teacher password step */}
+        {step === "teacher-pw" && foundTeacher && (
+          <div className="bg-white rounded-3xl p-6 shadow-md">
+            <h2 className="font-bold text-gray-800 mb-1"> 교사 비밀번호</h2>
+            <p className="text-xs text-gray-400 mb-4">{foundTeacher.name} 선생님, 비밀번호를 입력해주세요</p>
+            <input type="password" value={teacherPw} onChange={e => setTeacherPw(e.target.value)} onKeyDown={e => e.key === "Enter" && handleTeacherPw()}
+              placeholder="비밀번호" className="w-full border-2 border-gray-200 focus:border-orange-400 rounded-2xl px-4 py-3 text-lg outline-none mb-3" />
+            {error && <p className="text-sm text-red-500 mb-3">{error}</p>}
+            <button onClick={handleTeacherPw} className="w-full bg-orange-400 text-white font-bold py-3 rounded-2xl hover:bg-orange-500 transition-colors">로그인</button>
+            <button onClick={() => { setStep("teacher"); setTeacherPw(""); setError(""); }} className="w-full mt-2 text-sm text-gray-400 hover:text-gray-600"> 뒤로</button>
+          </div>
+        )}
+
+        {step === "master" && (
+          <div className="bg-white rounded-3xl p-6 shadow-md">
+            <div className="flex items-center gap-2 mb-4">
+              <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-yellow-400 to-orange-500 flex items-center justify-center text-sm font-bold text-white">M</div>
+              <div><h2 className="font-bold text-gray-800">마스터 관리자</h2><p className="text-xs text-gray-400">전체 플랫폼 관리</p></div>
+            </div>
+            <input value={masterId} onChange={e => setMasterId(e.target.value)} onKeyDown={e => e.key === "Enter" && handleMasterLogin()}
+              placeholder="아이디" className="w-full border-2 border-gray-200 focus:border-yellow-400 rounded-2xl px-4 py-3 text-base outline-none mb-2" />
+            <input type="password" value={masterPw} onChange={e => setMasterPw(e.target.value)} onKeyDown={e => e.key === "Enter" && handleMasterLogin()}
+              placeholder="비밀번호" className="w-full border-2 border-gray-200 focus:border-yellow-400 rounded-2xl px-4 py-3 text-base outline-none mb-3" />
+            {error && <p className="text-sm text-red-500 mb-3">{error}</p>}
+            <button onClick={handleMasterLogin} className="w-full bg-gradient-to-r from-yellow-400 to-orange-400 text-white font-bold py-3 rounded-2xl hover:from-yellow-500 hover:to-orange-500 transition-all">로그인</button>
+            <button onClick={() => { setStep("role"); setError(""); }} className="w-full mt-2 text-sm text-gray-400 hover:text-gray-600"> 뒤로</button>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// 
+// ROOT
+// 
+function Spinner({ text }) {
+  return (
+    <div className="min-h-screen bg-gradient-to-b from-purple-50 to-green-50 flex flex-col items-center justify-center gap-4">
+      <div className="text-5xl">\uD83C\uDF31</div>
+      <div className="w-10 h-10 border-4 border-purple-200 border-t-purple-500 rounded-full animate-spin"></div>
+      <p className="text-sm text-gray-400">{text}</p>
+    </div>
+  );
+}
+
+function App() {
+  const [teachers, setTeachers] = useState([]);
+  const [classes,  setClasses]  = useState([]);
+  const [loading,  setLoading]  = useState(true);
+  const [dbError,  setDbError]  = useState(null);
+  const [mode,     setMode]     = useState("login");
+  const [currentStudentId,  setCurrentStudentId]  = useState(null);
+  const [currentClassId,    setCurrentClassId]    = useState(null);
+  const [currentTeacherId,  setCurrentTeacherId]  = useState(null);
+
+  useEffect(() => { loadAll(); }, []);
+
+  async function loadAll() {
+    setLoading(true); setDbError(null);
+    try {
+      const [tRows, cRows, sRows, rRows] = await Promise.all([
+        sbGet("teachers", ""),
+        sbGet("classes",  ""),
+        sbGet("students", "?order=num.asc"),
+        sbGet("records",  "?order=date.desc,id.desc"),
+      ]);
+      await loadApiKey();
+      setTeachers(tRows.map(rowToTeacher));
+      setClasses(cRows.map(row => ({
+        id: row.id, teacherId: row.teacher_id, code: row.code, name: row.name,
+        students: sRows.filter(s => s.class_id === row.id).map(rowToStudent),
+        records:  rRows.filter(r => r.class_id === row.id).map(rowToRecord),
+      })));
+    } catch(e) {
+      console.error(e);
+      setDbError(e.message);
+    }
+    setLoading(false);
+  }
+
+  const classData      = classes.find(c => c.id === currentClassId);
+  const liveStudent    = classData?.students.find(s => s.id === currentStudentId);
+  const liveTeacher    = teachers.find(t => t.id === currentTeacherId);
+  const teacherClasses = classes.filter(c => c.teacherId === currentTeacherId);
+
+  function updateClass(classId, fn) {
+    setClasses(cs => cs.map(c => c.id === classId ? fn(c) : c));
+  }
+
+  async function addRecord(classId, record, xpTotal, profileScores, atlScores) {
+    // 1. 로컬 상태 즉시 반영
+    setClasses(cs => cs.map(c => {
+      if (c.id !== classId) return c;
+      const students = c.students.map(s => {
+        if (s.id !== record.studentId) return s;
+        const newXp = s.totalXp + xpTotal;
+        const newP = { ...s.profiles };
+        Object.entries(profileScores||{}).forEach(([k,v]) => { newP[k] = (newP[k]||0)+(v||0); });
+        const newA = { ...s.atl };
+        Object.entries(atlScores||{}).forEach(([k,v]) => { newA[k] = (newA[k]||0)+(v||0); });
+        const newH = [...(s.xpHistory||[]), { date: record.date, xp: newXp }];
+        return { ...s, totalXp: newXp, level: getLv(newXp).lv, profiles: newP, atl: newA, xpHistory: newH };
+      });
+      return { ...c, students, records: [record, ...c.records] };
+    }));
+    // 2. DB 저장
+    try {
+      await dbSaveRecord(record, classId);
+      const cls = classes.find(c => c.id === classId);
+      const stu = cls?.students.find(s => s.id === record.studentId);
+      if (stu) {
+        const newXp = stu.totalXp + xpTotal;
+        const newP = { ...stu.profiles };
+        Object.entries(profileScores||{}).forEach(([k,v]) => { newP[k] = (newP[k]||0)+(v||0); });
+        const newA = { ...stu.atl };
+        Object.entries(atlScores||{}).forEach(([k,v]) => { newA[k] = (newA[k]||0)+(v||0); });
+        const newH = [...(stu.xpHistory||[]), { date: record.date, xp: newXp }];
+        await dbSaveStudent({ ...stu, totalXp: newXp, level: getLv(newXp).lv, profiles: newP, atl: newA, xpHistory: newH }, classId);
+      }
+    } catch(e) { console.error("DB \uc800\uc7a5 \uc2e4\ud328:", e); }
+  }
+
+  async function addTeacherFn(t) {
+    try {
+      await sbUpsert("teachers", { id: t.id, name: t.name, teacher_code: t.teacherCode,
+        teacher_password: t.teacherPassword||"", email: t.email||"", class_ids: t.classIds||[] });
+      setTeachers(ts => [...ts, t]);
+    } catch(e) { alert("\uad50\uc0ac \ub4f1\ub85d \uc2e4\ud328: " + e.message); }
+  }
+  async function removeTeacherFn(id) {
+    try { await sbDelete("teachers", id); setTeachers(ts => ts.filter(t => t.id !== id)); }
+    catch(e) { alert("\uc0ad\uc81c \uc2e4\ud328: " + e.message); }
+  }
+  function updateTeacherFn(id, fn) {
+    const t = teachers.find(x => x.id === id);
+    if (!t) return;
+    const updated = fn(t);
+    setTeachers(ts => ts.map(x => x.id === id ? updated : x));
+    sbPatch("teachers", id, { name: updated.name, teacher_code: updated.teacherCode,
+      teacher_password: updated.teacherPassword||"", email: updated.email||"" }).catch(e => console.error(e));
+  }
+  async function addClassForTeacher(cls) {
+    try {
+      await sbUpsert("classes", { id: cls.id, teacher_id: cls.teacherId, code: cls.code, name: cls.name });
+      setClasses(cs => [...cs, cls]);
+      setTeachers(ts => ts.map(t => t.id === cls.teacherId ? { ...t, classIds: [...(t.classIds||[]), cls.id] } : t));
+    } catch(e) { alert("\ubc18 \uc0dd\uc131 \uc2e4\ud328: " + e.message); }
+  }
+
+  function logout() { setMode("login"); setCurrentStudentId(null); setCurrentClassId(null); setCurrentTeacherId(null); }
+
+  if (loading) return <Spinner text="\ub370\uc774\ud130\ub97c \ubd88\ub7ec\uc624\ub294 \uc911..." />;
+  if (dbError) return (
+    <div className="min-h-screen bg-red-50 flex flex-col items-center justify-center gap-4 p-6">
+      <div className="text-5xl">\u26a0\ufe0f</div>
+      <h2 className="text-lg font-bold text-red-700">Supabase \uc5f0\uacb0 \uc624\ub958</h2>
+      <p className="text-sm text-red-500 text-center max-w-sm">{dbError}</p>
+      <button onClick={loadAll} className="bg-red-500 text-white px-6 py-2 rounded-xl font-bold">\ub2e4\uc2dc \uc2dc\ub3c4</button>
+    </div>
+  );
+
+  if (mode === "login") {
+    return <LoginScreen teachers={teachers} classes={classes}
+      onStudentLogin={(st, cls) => {
+        console.log("student login:", st.id, cls.id, "classes:", classes.map(c=>c.id));
+        setCurrentStudentId(st.id);
+        setCurrentClassId(cls.id);
+        setMode("student");
+      }}
+      onTeacherLogin={t => { setCurrentTeacherId(t.id); setMode("teacher"); }}
+      onMasterLogin={() => setMode("master")} />;
+  }
+  if (mode === "student") {
+    if (liveStudent && classData) {
+      return <StudentApp student={liveStudent} classData={classData}
+        onAddRecord={(rec, xp, ps, as) => addRecord(currentClassId, rec, xp, ps, as)}
+        onDeleteRecord={(recId, xp, profileScores) => {
+          setClasses(cs => cs.map(c => {
+            if (c.id !== currentClassId) return c;
+            const students = c.students.map(s => {
+              if (s.id !== currentStudentId) return s;
+              const newXp = Math.max(0, s.totalXp - xp);
+              const newP = { ...s.profiles };
+              Object.entries(profileScores || {}).forEach(([k,v]) => { newP[k] = Math.max(0,(newP[k]||0)-(v||0)); });
+              return { ...s, totalXp: newXp, level: getLv(newXp).lv, profiles: newP };
+            });
+            return { ...c, students, records: c.records.filter(r => r.id !== recId) };
+          }));
+        }}
+        onLogout={logout} />;
+    }
+    // 데이터 못 찾으면 로그인으로
+    if (!loading) { logout(); }
+    return (
+      <div className="min-h-screen bg-gradient-to-b from-purple-50 to-green-50 flex flex-col items-center justify-center gap-4">
+        <div className="w-10 h-10 border-4 border-purple-200 border-t-purple-500 rounded-full animate-spin"></div>
+        <p className="text-sm text-gray-400">{"\ub370\uc774\ud130 \ub85c\ub529 \uc911..."}</p>
+      </div>
+    );
+  }
+  if (mode === "teacher" && liveTeacher) {
+    return <TeacherApp teacher={liveTeacher} classes={teacherClasses}
+      onLogout={logout} onUpdateClass={updateClass}
+      onAddClass={cls => addClassForTeacher({ ...cls, teacherId: liveTeacher.id })}
+      onDeleteClass={id => { setClasses(cs => cs.filter(c => c.id !== id)); }}
+      onAddStudent={async (st, classId) => { await dbSaveStudent(st, classId); }}
+      onDeleteStudent={async (id) => { await sbDelete("students", id); }}
+      onUpdateStudent={async (st, classId) => { await dbSaveStudent(st, classId); }}
+      onGrantXP={async (rec, classId, updStu) => {
+        await dbSaveRecord(rec, classId);
+        await dbSaveStudent(updStu, classId);
+      }} />;
+  }
+  if (mode === "master") {
+    return <MasterApp teachers={teachers} classes={classes}
+      onLogout={logout} onAddTeacher={addTeacherFn}
+      onRemoveTeacher={removeTeacherFn} onUpdateTeacher={updateTeacherFn} />;
+  }
+  return null;
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(React.createElement(App));
+  </script>
+</body>
+</html>
